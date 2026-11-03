@@ -163,7 +163,7 @@ def apply_style():
     h1,h2,h3{{color:#17140e!important}} p,label,.stMarkdown{{color:#2b261c}}
     section[data-testid='stSidebar']{{background:rgba(252,249,241,.97);border-right:1px solid var(--line)}}
     [data-testid='stForm'],.academy-card{{background:rgba(255,255,255,.82);border:1px solid var(--line);border-radius:18px;padding:18px;box-shadow:0 12px 32px rgba(45,34,10,.10)}}
-    div[data-testid='stMetric']{{background:rgba(255,255,255,.86);border:1px solid var(--line);border-radius:18px;padding:16px}}
+    div[data-testid='stMetric']{{background:rgba(15,15,15,0.48);border:1px solid var(--line);border-radius:18px;padding:16px}}
     div.stButton>button,div.stDownloadButton>button{{background:linear-gradient(135deg,#9c7427,#d0ae5a)!important;color:white!important;border:1px solid #e4ca86!important;border-radius:12px!important;min-height:44px;font-weight:800!important;box-shadow:0 8px 18px rgba(128,91,22,.2)}}
     div.stButton>button[kind='primary']{{background:linear-gradient(135deg,#1b1812,#4b3b1d)!important;border-color:#d9ba65!important}}
     .hero{{border-radius:24px;padding:28px;background:linear-gradient(135deg,rgba(255,255,255,.92),rgba(246,237,215,.84));border:1px solid var(--line);box-shadow:0 18px 50px rgba(37,28,8,.14);margin-bottom:18px;text-align:center}}
