@@ -463,8 +463,13 @@ def apply_style():
             font-weight: 800;
         }}
 
-        .st-key-parent_nav { margin-top:72px !important; }
-        [data-testid="stSidebar"] [data-testid="stRadio"] { margin-top:18px !important; }
+        .st-key-parent_nav {{
+            margin-top: 72px !important;
+        }}
+        
+        [data-testid="stSidebar"] [data-testid="stRadio"] {{
+            margin-top: 18px !important;
+        }}
         @media (max-width: 768px) {{
             .block-container {{
                 padding: 0.8rem 0.7rem 3rem;
