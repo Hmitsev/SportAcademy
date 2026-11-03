@@ -129,6 +129,15 @@ def init_db():
             title TEXT NOT NULL, body TEXT, media_type TEXT NOT NULL DEFAULT 'image',
             media_url TEXT, image_data BYTEA, image_mime TEXT, published BOOLEAN NOT NULL DEFAULT TRUE,
             created_by BIGINT REFERENCES users(id), created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""",
+        """CREATE TABLE IF NOT EXISTS match_squads(
+            id BIGSERIAL PRIMARY KEY, academy_id BIGINT NOT NULL REFERENCES academies(id) ON DELETE CASCADE,
+            event_id BIGINT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+            player_id BIGINT NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+            squad_status TEXT NOT NULL DEFAULT 'not_in_group',
+            selected_by BIGINT REFERENCES users(id) ON DELETE SET NULL,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            UNIQUE(event_id,player_id))""",
+        """CREATE INDEX IF NOT EXISTS idx_match_squads_event ON match_squads(academy_id,event_id,player_id)""",
         """CREATE TABLE IF NOT EXISTS attendance(
             id BIGSERIAL PRIMARY KEY, academy_id BIGINT NOT NULL REFERENCES academies(id) ON DELETE CASCADE,
             event_id BIGINT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
@@ -542,14 +551,39 @@ def parent_panel(user):
     page=st.session_state.parent_page
     if child["approval_status"]!="approved": st.warning("Детето очаква одобрение и свързване с група от администратор.")
     if page=="Начало":
+        latest_info = fetchone(
+            "SELECT * FROM public_posts WHERE academy_id=%s AND published ORDER BY created_at DESC LIMIT 1",
+            (ACADEMY_ID,),
+        )
         c1,c2,c3=st.columns(3)
-        upcoming=fetchall("SELECT * FROM events WHERE academy_id=%s AND team_id=%s AND starts_at>=NOW() ORDER BY starts_at LIMIT 2",(ACADEMY_ID,child.get("team_id"))) if child.get("team_id") else []
-        c1.metric("Предстоящи събития",len(upcoming)); c2.metric("Набор",child.get("team_name") or "—"); c3.metric("Такса",f"{academy()['default_fee']:.2f} EUR")
-        for e in upcoming: st.info(f"{e['starts_at']:%d.%m %H:%M} · {e['title']} · {e.get('location') or ''}")
+        c1.metric("Актуална информация", "1" if latest_info else "0")
+        c2.metric("Набор",child.get("team_name") or "—")
+        c3.metric("Такса",f"{academy()['default_fee']:.2f} EUR")
+        if latest_info:
+            with st.container(border=True):
+                st.subheader(latest_info["title"])
+                st.write(latest_info.get("body") or "")
+                st.caption(latest_info["created_at"].strftime("%d.%m.%Y %H:%M"))
+        else:
+            st.info("Няма нова информация от академията.")
     elif page in ("Тренировки","Мачове"):
         typ="training" if page=="Тренировки" else "match"
-        rows=fetchall("SELECT * FROM events WHERE academy_id=%s AND team_id=%s AND event_type=%s ORDER BY starts_at DESC LIMIT 40",(ACADEMY_ID,child.get("team_id"),typ)) if child.get("team_id") else []
-        for r in rows: st.write(f"**{r['title']}** · {r['starts_at']:%d.%m.%Y %H:%M} · {r.get('location') or 'Без място'}")
+        rows=fetchall("SELECT * FROM events WHERE academy_id=%s AND team_id=%s AND event_type=%s ORDER BY starts_at ASC LIMIT 40",(ACADEMY_ID,child.get("team_id"),typ)) if child.get("team_id") else []
+        for r in rows:
+            with st.container(border=True):
+                st.write(f"**{r['title']}** · {r['starts_at']:%d.%m.%Y %H:%M} · {r.get('location') or 'Без място'}")
+                if typ == "match":
+                    squad = fetchone(
+                        "SELECT squad_status FROM match_squads WHERE academy_id=%s AND event_id=%s AND player_id=%s",
+                        (ACADEMY_ID, r["id"], child["id"]),
+                    )
+                    if squad:
+                        if squad["squad_status"] == "in_group":
+                            st.success("🟢 Детето е в групата за този мач.")
+                        else:
+                            st.warning("🔴 Детето не е в групата за този мач.")
+                    else:
+                        st.caption("Треньорът още не е публикувал група за този мач.")
         if not rows: st.info("Няма добавени записи.")
     elif page=="Съобщения":
         rows=fetchall("SELECT * FROM team_messages WHERE academy_id=%s AND team_id=%s ORDER BY created_at DESC",(ACADEMY_ID,child.get("team_id"))) if child.get("team_id") else []
@@ -572,17 +606,22 @@ def parent_panel(user):
             execute("INSERT INTO parent_players(academy_id,parent_user_id,player_id) VALUES(%s,%s,%s)",(ACADEMY_ID,user["id"],p["id"])); st.success("Детето е добавено и очаква одобрение."); st.rerun()
 
 def save_events_for_dates(user_id, team_id, event_type, title, dates, event_time, location, description):
-    created = 0
-    for event_date in dates:
-        execute(
-            """INSERT INTO events(academy_id,team_id,event_type,title,starts_at,location,description,created_by)
-               VALUES(%s,%s,%s,%s,%s,%s,%s,%s)""",
-            (ACADEMY_ID, team_id, event_type, title.strip(), datetime.combine(event_date, event_time),
-             location.strip(), description.strip(), user_id),
+    # Всяко ново публикуване става единствената актуална програма за този набор и тип.
+    with db() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            "DELETE FROM events WHERE academy_id=%s AND team_id=%s AND event_type=%s",
+            (ACADEMY_ID, team_id, event_type),
         )
-        created += 1
+        created = 0
+        for event_date in dates:
+            cur.execute(
+                """INSERT INTO events(academy_id,team_id,event_type,title,starts_at,location,description,created_by)
+                   VALUES(%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (ACADEMY_ID, team_id, event_type, title.strip(), datetime.combine(event_date, event_time),
+                 location.strip(), description.strip(), user_id),
+            )
+            created += 1
     return created
-
 
 def multi_date_event_form(form_key, teams, user_id, fixed_team_id=None):
     tmap = {t["name"]: t["id"] for t in teams}
@@ -899,7 +938,15 @@ def admin_panel(user):
             title=st.text_input("Заглавие"); body=st.text_area("Текст"); typ=st.radio("Медия",["image","video"],format_func=lambda x:"Снимка" if x=="image" else "Видео линк",horizontal=True); url=st.text_input("URL за видео/снимка"); upload=st.file_uploader("Или качи снимка",type=["jpg","jpeg","png","webp"]); send=st.form_submit_button("Публикувай в родителска информация",use_container_width=True)
         if send and title.strip():
             data=upload.getvalue() if upload else None; mime=upload.type if upload else None
-            execute("INSERT INTO public_posts(academy_id,title,body,media_type,media_url,image_data,image_mime,created_by) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",(ACADEMY_ID,title.strip(),body,typ,url.strip() or None,data,mime,user["id"])); st.rerun()
+            with db() as conn, conn.cursor() as cur:
+                cur.execute("DELETE FROM public_posts WHERE academy_id=%s", (ACADEMY_ID,))
+                cur.execute(
+                    """INSERT INTO public_posts(academy_id,title,body,media_type,media_url,image_data,image_mime,created_by)
+                       VALUES(%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    (ACADEMY_ID,title.strip(),body,typ,url.strip() or None,data,mime,user["id"]),
+                )
+            st.success("Новата информация е публикувана и предишната е заменена.")
+            st.rerun()
 
 
 def coach_panel(user):
@@ -913,7 +960,7 @@ def coach_panel(user):
         st.info("Няма възложени набори към този треньор.")
         return
     st.sidebar.caption(coach["display_name"])
-    sections = ["Табло", "Моите деца", "Тренировки и мачове", "Присъствие", "Съобщения"]
+    sections = ["Табло", "Моите деца", "Тренировки и мачове", "Група за мача", "Присъствие", "Съобщения"]
     sec = st.sidebar.radio("Треньорско меню", sections)
     tmap = {t["name"]: t for t in teams}
     team_name = st.selectbox("Избран набор", list(tmap), key="coach_selected_team")
@@ -929,6 +976,57 @@ def coach_panel(user):
         if not players: st.info("Няма потвърдени деца в този набор.")
     elif sec == "Тренировки и мачове":
         multi_date_event_form("coach_event_form", teams, user["id"], fixed_team_id=team["id"])
+    elif sec == "Група за мача":
+        matches = fetchall(
+            "SELECT * FROM events WHERE academy_id=%s AND team_id=%s AND event_type='match' ORDER BY starts_at ASC",
+            (ACADEMY_ID, team["id"]),
+        )
+        if not matches:
+            st.info("Няма публикувани мачове за този набор.")
+        else:
+            mmap = {f"{m['starts_at']:%d.%m.%Y %H:%M} · {m['title']}": m for m in matches}
+            match_label = st.selectbox("Избери мач", list(mmap), key="squad_match")
+            match = mmap[match_label]
+            players = fetchall(
+                "SELECT * FROM players WHERE academy_id=%s AND team_id=%s AND approval_status='approved' AND active ORDER BY first_name,last_name",
+                (ACADEMY_ID, team["id"]),
+            )
+            existing = {
+                row["player_id"]: row["squad_status"]
+                for row in fetchall(
+                    "SELECT player_id,squad_status FROM match_squads WHERE academy_id=%s AND event_id=%s",
+                    (ACADEMY_ID, match["id"]),
+                )
+            }
+            st.caption("Използването на този списък е по желание на треньора и според договорката с родителите.")
+            with st.form(f"match_squad_{match['id']}"):
+                choices = {}
+                values = ["in_group", "not_in_group"]
+                for player in players:
+                    current = existing.get(player["id"], "not_in_group")
+                    choices[player["id"]] = st.selectbox(
+                        f"{player['first_name']} {player['last_name']}",
+                        values,
+                        index=values.index(current),
+                        format_func=lambda x: "В групата" if x == "in_group" else "Не е в групата",
+                        key=f"squad_{match['id']}_{player['id']}",
+                    )
+                publish_squad = st.form_submit_button("Изпрати групата към родителите", use_container_width=True)
+            if publish_squad:
+                with db() as conn, conn.cursor() as cur:
+                    cur.execute(
+                        "DELETE FROM match_squads WHERE academy_id=%s AND event_id=%s",
+                        (ACADEMY_ID, match["id"]),
+                    )
+                    for player_id, squad_status in choices.items():
+                        cur.execute(
+                            """INSERT INTO match_squads(academy_id,event_id,player_id,squad_status,selected_by)
+                               VALUES(%s,%s,%s,%s,%s)""",
+                            (ACADEMY_ID, match["id"], player_id, squad_status, user["id"]),
+                        )
+                st.success("Групата за мача е изпратена към родителите.")
+                st.rerun()
+
     elif sec == "Присъствие":
         events = fetchall("SELECT * FROM events WHERE academy_id=%s AND team_id=%s ORDER BY starts_at DESC LIMIT 40", (ACADEMY_ID, team["id"]))
         if not events: st.info("Първо създай тренировка или мач.")
