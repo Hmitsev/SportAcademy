@@ -456,28 +456,32 @@ def hero():
         st.markdown('</div>',unsafe_allow_html=True)
 
 def public_home():
+    # Стартовата страница показва само идентичността на академията.
+    # Информацията от администратора е достъпна след вход в родителския профил.
     hero()
-    posts=fetchall("SELECT * FROM public_posts WHERE academy_id=%s AND published ORDER BY created_at DESC LIMIT 12",(ACADEMY_ID,))
+
+
+def parent_information():
+    st.subheader("ℹ️ Информация от академията")
+    posts = fetchall(
+        "SELECT * FROM public_posts WHERE academy_id=%s AND published ORDER BY created_at DESC LIMIT 50",
+        (ACADEMY_ID,),
+    )
     if not posts:
-        st.subheader("Добре дошли в Dyulgerov Academy")
-        st.write(
-            "Публичната начална страница е готова за снимки, "
-            "видеа и новини от администратора."
-        )
-    
-        if ASSETS["coming"].exists():
-            st.image(
-                str(ASSETS["coming"]),
-                use_container_width=True
-            )
+        st.info("Все още няма публикувана информация от академията.")
+        return
     for post in posts:
         with st.container(border=True):
-            if post.get("image_data"): st.image(bytes(post["image_data"]),use_container_width=True)
+            if post.get("image_data"):
+                st.image(bytes(post["image_data"]), use_container_width=True)
             elif post.get("media_url"):
-                if post["media_type"]=="video": st.video(post["media_url"])
-                else: st.image(post["media_url"],use_container_width=True)
-            st.subheader(post["title"]); st.write(post.get("body") or "")
-            st.caption(post["created_at"].strftime("%d.%m.%Y"))
+                if post["media_type"] == "video":
+                    st.video(post["media_url"])
+                else:
+                    st.image(post["media_url"], use_container_width=True)
+            st.subheader(post["title"])
+            st.write(post.get("body") or "")
+            st.caption(post["created_at"].strftime("%d.%m.%Y %H:%M"))
 
 def register_parent():
     st.subheader("Регистрация на родител")
@@ -516,7 +520,7 @@ def login():
         else: st.session_state.user_id=user["id"]; st.rerun()
 
 def parent_nav():
-    items=[("🏠 Начало","Начало"),("📅 Тренировки","Тренировки"),("⚽ Мачове","Мачове"),("💬 Съобщения","Съобщения"),("💰 Такси","Такси"),("💳 Плащане с карта","Карта"),("📰 Новини","Новини"),("👤 Настройки","Настройки")]
+    items=[("🏠 Начало","Начало"),("📅 Тренировки","Тренировки"),("⚽ Мачове","Мачове"),("💬 Съобщения","Съобщения"),("💰 Такси","Такси"),("💳 Плащане с карта","Карта"),("ℹ️ Информация","Информация"),("👤 Настройки","Настройки")]
     st.session_state.setdefault("parent_page","Начало")
     with st.container(key="parent_nav"):
         for start in range(0,len(items),2):
@@ -557,7 +561,7 @@ def parent_panel(user):
         for r in rows: st.write(f"{r['fee_month']:02d}.{r['fee_year']} · **{r['final_amount']:.2f} EUR** · {r['status']} · {r.get('adjustment_reason') or ''}")
         if not rows: st.info("Няма начислени такси.")
     elif page=="Карта": st.warning("Плащането с карта е подготвено като модул и очаква избор на платежен доставчик и договор.")
-    elif page=="Новини": public_home()
+    elif page=="Информация": parent_information()
     else:
         st.subheader("Профил и деца")
         with st.form("add_child_later"):
@@ -649,7 +653,7 @@ def coach_account_manager():
 def admin_panel(user):
     st.title("Административен панел")
     sections = ["Табло", "Регистрации", "Деца и групи", "Треньори и набори", "Роли и права",
-                "Тренировки и мачове", "Съобщения", "Такси", "Публични новини"]
+                "Тренировки и мачове", "Съобщения", "Такси", "Информация"]
     sec = st.sidebar.radio("Админ меню", sections)
 
     if sec == "Табло":
@@ -782,6 +786,89 @@ def admin_panel(user):
                         )
                         st.success(f"Паролата за {account['email']} е сменена успешно.")
 
+
+                st.markdown("---")
+                st.markdown("#### 🗑️ Окончателно изтриване на профила")
+                if account["id"] == user["id"] or account["email"].strip().lower() == ADMIN_EMAIL:
+                    st.info("Текущият и основният Admin профил са защитени и не могат да бъдат изтрити от този екран.")
+                else:
+                    st.warning(
+                        "Действието е необратимо. Coach достъпът ще бъде освободен. "
+                        "При Parent ще бъдат премахнати връзките с децата, а деца без друг родител ще бъдат изтрити заедно с таксите и присъствията им."
+                    )
+                    delete_user_confirmation = st.text_input(
+                        'За потвърждение напиши точно ИЗТРИЙ',
+                        key=f"delete_user_confirm_{account['id']}",
+                        placeholder="ИЗТРИЙ",
+                    )
+                    if st.button(
+                        "🗑️ Изтрий потребителския профил",
+                        key=f"delete_user_{account['id']}",
+                        use_container_width=True,
+                    ):
+                        if delete_user_confirmation.strip() != "ИЗТРИЙ":
+                            st.error('Профилът не е изтрит. Напиши точно „ИЗТРИЙ“.')
+                        else:
+                            with db() as conn, conn.cursor() as cur:
+                                cur.execute(
+                                    "SELECT id,role,email FROM users WHERE id=%s AND academy_id=%s FOR UPDATE",
+                                    (account["id"], ACADEMY_ID),
+                                )
+                                target = cur.fetchone()
+                                if not target:
+                                    st.error("Профилът вече не съществува.")
+                                elif target[0] == user["id"] or target[2].strip().lower() == ADMIN_EMAIL:
+                                    st.error("Основният Admin профил е защитен.")
+                                else:
+                                    target_id = target[0]
+                                    cur.execute(
+                                        "SELECT player_id FROM parent_players WHERE academy_id=%s AND parent_user_id=%s",
+                                        (ACADEMY_ID, target_id),
+                                    )
+                                    linked_players = [row[0] for row in cur.fetchall()]
+
+                                    cur.execute(
+                                        "UPDATE coaches SET user_id=NULL WHERE academy_id=%s AND user_id=%s",
+                                        (ACADEMY_ID, target_id),
+                                    )
+                                    cur.execute(
+                                        "UPDATE events SET created_by=NULL WHERE academy_id=%s AND created_by=%s",
+                                        (ACADEMY_ID, target_id),
+                                    )
+                                    cur.execute(
+                                        "UPDATE team_messages SET sender_user_id=NULL WHERE academy_id=%s AND sender_user_id=%s",
+                                        (ACADEMY_ID, target_id),
+                                    )
+                                    cur.execute(
+                                        "UPDATE public_posts SET created_by=NULL WHERE academy_id=%s AND created_by=%s",
+                                        (ACADEMY_ID, target_id),
+                                    )
+                                    cur.execute(
+                                        "UPDATE attendance SET marked_by=NULL WHERE academy_id=%s AND marked_by=%s",
+                                        (ACADEMY_ID, target_id),
+                                    )
+                                    cur.execute(
+                                        "DELETE FROM parent_players WHERE academy_id=%s AND parent_user_id=%s",
+                                        (ACADEMY_ID, target_id),
+                                    )
+
+                                    for player_id in linked_players:
+                                        cur.execute(
+                                            "SELECT COUNT(*) FROM parent_players WHERE academy_id=%s AND player_id=%s",
+                                            (ACADEMY_ID, player_id),
+                                        )
+                                        if cur.fetchone()[0] == 0:
+                                            cur.execute("DELETE FROM attendance WHERE academy_id=%s AND player_id=%s", (ACADEMY_ID, player_id))
+                                            cur.execute("DELETE FROM player_fees WHERE academy_id=%s AND player_id=%s", (ACADEMY_ID, player_id))
+                                            cur.execute("DELETE FROM players WHERE academy_id=%s AND id=%s", (ACADEMY_ID, player_id))
+
+                                    cur.execute(
+                                        "DELETE FROM users WHERE academy_id=%s AND id=%s",
+                                        (ACADEMY_ID, target_id),
+                                    )
+                            st.success(f"Профилът {account['email']} е изтрит окончателно.")
+                            st.rerun()
+
     elif sec == "Тренировки и мачове":
         teams = fetchall("SELECT * FROM teams WHERE academy_id=%s AND active ORDER BY birth_year", (ACADEMY_ID,))
         multi_date_event_form("admin_event_form", teams, user["id"])
@@ -809,7 +896,7 @@ def admin_panel(user):
 
     else:
         with st.form("post_form"):
-            title=st.text_input("Заглавие"); body=st.text_area("Текст"); typ=st.radio("Медия",["image","video"],format_func=lambda x:"Снимка" if x=="image" else "Видео линк",horizontal=True); url=st.text_input("URL за видео/снимка"); upload=st.file_uploader("Или качи снимка",type=["jpg","jpeg","png","webp"]); send=st.form_submit_button("Публикувай на началната страница",use_container_width=True)
+            title=st.text_input("Заглавие"); body=st.text_area("Текст"); typ=st.radio("Медия",["image","video"],format_func=lambda x:"Снимка" if x=="image" else "Видео линк",horizontal=True); url=st.text_input("URL за видео/снимка"); upload=st.file_uploader("Или качи снимка",type=["jpg","jpeg","png","webp"]); send=st.form_submit_button("Публикувай в родителска информация",use_container_width=True)
         if send and title.strip():
             data=upload.getvalue() if upload else None; mime=upload.type if upload else None
             execute("INSERT INTO public_posts(academy_id,title,body,media_type,media_url,image_data,image_mime,created_by) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",(ACADEMY_ID,title.strip(),body,typ,url.strip() or None,data,mime,user["id"])); st.rerun()
