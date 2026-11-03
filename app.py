@@ -129,6 +129,22 @@ def init_db():
             title TEXT NOT NULL, body TEXT, media_type TEXT NOT NULL DEFAULT 'image',
             media_url TEXT, image_data BYTEA, image_mime TEXT, published BOOLEAN NOT NULL DEFAULT TRUE,
             created_by BIGINT REFERENCES users(id), created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""",
+        """CREATE TABLE IF NOT EXISTS feedback(
+            id BIGSERIAL PRIMARY KEY, academy_id BIGINT NOT NULL REFERENCES academies(id) ON DELETE CASCADE,
+            parent_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            player_id BIGINT REFERENCES players(id) ON DELETE SET NULL,
+            coach_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            feedback_type TEXT NOT NULL DEFAULT 'signal', rating INTEGER,
+            subject TEXT NOT NULL, body TEXT NOT NULL,
+            is_read BOOLEAN NOT NULL DEFAULT FALSE,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""",
+        """CREATE TABLE IF NOT EXISTS notifications(
+            id BIGSERIAL PRIMARY KEY, academy_id BIGINT NOT NULL REFERENCES academies(id) ON DELETE CASCADE,
+            user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            notification_type TEXT NOT NULL, title TEXT NOT NULL, body TEXT,
+            is_read BOOLEAN NOT NULL DEFAULT FALSE,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""",
+        """CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(academy_id,user_id,is_read,created_at DESC)""",
         """CREATE TABLE IF NOT EXISTS match_squads(
             id BIGSERIAL PRIMARY KEY, academy_id BIGINT NOT NULL REFERENCES academies(id) ON DELETE CASCADE,
             event_id BIGINT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
@@ -456,6 +472,61 @@ def current_user():
     uid=st.session_state.get("user_id")
     return fetchone("SELECT * FROM users WHERE id=%s AND academy_id=%s",(uid,ACADEMY_ID)) if uid else None
 
+def create_notification(user_id, notification_type, title, body=""):
+    execute(
+        "INSERT INTO notifications(academy_id,user_id,notification_type,title,body) VALUES(%s,%s,%s,%s,%s)",
+        (ACADEMY_ID, user_id, notification_type, title, body),
+    )
+
+
+def unread_notification_count(user_id):
+    row = fetchone(
+        "SELECT COUNT(*) c FROM notifications WHERE academy_id=%s AND user_id=%s AND NOT is_read",
+        (ACADEMY_ID, user_id),
+    )
+    return row["c"] if row else 0
+
+
+def notification_center(user):
+    st.subheader("🔔 Известия")
+    rows = fetchall(
+        "SELECT * FROM notifications WHERE academy_id=%s AND user_id=%s ORDER BY created_at DESC LIMIT 50",
+        (ACADEMY_ID, user["id"]),
+    )
+    if not rows:
+        st.info("Няма известия.")
+        return
+    if st.button("Маркирай всички като прочетени", key=f"read_all_{user['id']}"):
+        execute("UPDATE notifications SET is_read=TRUE WHERE academy_id=%s AND user_id=%s", (ACADEMY_ID, user["id"]))
+        st.rerun()
+    for row in rows:
+        icon = "🔴" if not row["is_read"] else "⚪"
+        with st.container(border=True):
+            st.write(f"{icon} **{row['title']}**")
+            if row.get("body"): st.write(row["body"])
+            st.caption(row["created_at"].strftime("%d.%m.%Y %H:%M"))
+
+
+def notify_team_parents(team_id, notification_type, title, body=""):
+    parents = fetchall(
+        """SELECT DISTINCT pp.parent_user_id user_id FROM parent_players pp
+           JOIN players p ON p.id=pp.player_id
+           WHERE pp.academy_id=%s AND p.team_id=%s AND p.active""",
+        (ACADEMY_ID, team_id),
+    )
+    for parent in parents:
+        create_notification(parent["user_id"], notification_type, title, body)
+
+
+def notify_admins(notification_type, title, body=""):
+    admins = fetchall(
+        "SELECT id FROM users WHERE academy_id=%s AND role='admin' AND active AND account_status='approved'",
+        (ACADEMY_ID,),
+    )
+    for admin in admins:
+        create_notification(admin["id"], notification_type, title, body)
+
+
 def hero():
     with st.container():
         st.markdown('<div class="hero">',unsafe_allow_html=True)
@@ -529,7 +600,8 @@ def login():
         else: st.session_state.user_id=user["id"]; st.rerun()
 
 def parent_nav():
-    items=[("🏠 Начало","Начало"),("📅 Тренировки","Тренировки"),("⚽ Мачове","Мачове"),("💬 Съобщения","Съобщения"),("💰 Такси","Такси"),("💳 Плащане с карта","Карта"),("ℹ️ Информация","Информация"),("👤 Настройки","Настройки")]
+    count = unread_notification_count(st.session_state.get("user_id"))
+    items=[("🏠 Начало","Начало"),("📅 Тренировки","Тренировки"),("⚽ Мачове","Мачове"),("💬 Съобщения","Съобщения"),("💰 Такси","Такси"),("💳 Плащане с карта","Карта"),("ℹ️ Информация","Информация"),("📝 Обратна връзка","Обратна връзка"),(f"🔔 Известия ({count})","Известия"),("👤 Настройки","Настройки")]
     st.session_state.setdefault("parent_page","Начало")
     with st.container(key="parent_nav"):
         for start in range(0,len(items),2):
@@ -544,7 +616,7 @@ def parent_players(user):
         WHERE pp.academy_id=%s AND pp.parent_user_id=%s AND p.active ORDER BY p.first_name""",(ACADEMY_ID,user["id"]))
 
 def parent_panel(user):
-    hero(); parent_nav(); players=parent_players(user)
+    parent_nav(); players=parent_players(user)
     if not players: st.info("Няма добавени деца към профила."); return
     labels={f"{p['first_name']} {p['last_name']}":p for p in players}; chosen=st.selectbox("Избрано дете",list(labels)); child=labels[chosen]
     st.caption(f"Група: {child.get('team_name') or 'Очаква свързване'} · Треньор: {child.get('coach_name') or 'Очаква свързване'}")
@@ -571,7 +643,10 @@ def parent_panel(user):
         rows=fetchall("SELECT * FROM events WHERE academy_id=%s AND team_id=%s AND event_type=%s ORDER BY starts_at ASC LIMIT 40",(ACADEMY_ID,child.get("team_id"),typ)) if child.get("team_id") else []
         for r in rows:
             with st.container(border=True):
-                st.write(f"**{r['title']}** · {r['starts_at']:%d.%m.%Y %H:%M} · {r.get('location') or 'Без място'}")
+                st.markdown(
+                    f"<div class='schedule-line'>{r['title']} · {r['starts_at']:%d.%m.%Y %H:%M} · {r.get('location') or 'Без място'}</div>",
+                    unsafe_allow_html=True,
+                )
                 if typ == "match":
                     squad = fetchone(
                         "SELECT squad_status FROM match_squads WHERE academy_id=%s AND event_id=%s AND player_id=%s",
@@ -595,7 +670,37 @@ def parent_panel(user):
         for r in rows: st.write(f"{r['fee_month']:02d}.{r['fee_year']} · **{r['final_amount']:.2f} EUR** · {r['status']} · {r.get('adjustment_reason') or ''}")
         if not rows: st.info("Няма начислени такси.")
     elif page=="Карта": st.warning("Плащането с карта е подготвено като модул и очаква избор на платежен доставчик и договор.")
-    elif page=="Информация": parent_information()
+    elif page=="Информация":
+        parent_information()
+    elif page=="Известия":
+        notification_center(user)
+    elif page=="Обратна връзка":
+        st.subheader("📝 Обратна връзка към треньора")
+        coach_user = fetchone(
+            """SELECT c.user_id, c.display_name FROM teams t JOIN coaches c ON c.id=t.coach_id
+               WHERE t.academy_id=%s AND t.id=%s""",
+            (ACADEMY_ID, child.get("team_id")),
+        ) if child.get("team_id") else None
+        if not coach_user or not coach_user.get("user_id"):
+            st.warning("За този набор още няма активен треньорски профил.")
+        else:
+            with st.form(f"feedback_{child['id']}"):
+                feedback_type = st.selectbox("Тип", ["signal", "rating", "suggestion"], format_func=lambda x:{"signal":"Сигнал","rating":"Оценка","suggestion":"Предложение"}[x])
+                rating = st.slider("Оценка", 1, 5, 5) if feedback_type == "rating" else None
+                subject = st.text_input("Тема")
+                body = st.text_area("Съобщение")
+                send_feedback = st.form_submit_button("Изпрати само към треньора", use_container_width=True)
+            if send_feedback:
+                if not subject.strip() or not body.strip():
+                    st.error("Попълни тема и съобщение.")
+                else:
+                    execute(
+                        """INSERT INTO feedback(academy_id,parent_user_id,player_id,coach_user_id,feedback_type,rating,subject,body)
+                           VALUES(%s,%s,%s,%s,%s,%s,%s,%s)""",
+                        (ACADEMY_ID,user["id"],child["id"],coach_user["user_id"],feedback_type,rating,subject.strip(),body.strip()),
+                    )
+                    create_notification(coach_user["user_id"], "feedback", "Нова обратна връзка от родител", subject.strip())
+                    st.success("Обратната връзка е изпратена само към треньора.")
     else:
         st.subheader("Профил и деца")
         with st.form("add_child_later"):
@@ -690,9 +795,10 @@ def coach_account_manager():
 
 
 def admin_panel(user):
-    st.title("Административен панел")
+    count = unread_notification_count(user["id"])
+    st.title(f"Административен панел  🔔 {count}")
     sections = ["Табло", "Регистрации", "Деца и групи", "Треньори и набори", "Роли и права",
-                "Тренировки и мачове", "Съобщения", "Такси", "Информация"]
+                "Тренировки и мачове", "Съобщения", "Такси", "Информация", "Известия"]
     sec = st.sidebar.radio("Админ меню", sections)
 
     if sec == "Табло":
@@ -917,7 +1023,12 @@ def admin_panel(user):
         with st.form("msg_form"):
             team = st.selectbox("Набор", list(tmap)); title = st.text_input("Заглавие"); body = st.text_area("Съобщение"); send = st.form_submit_button("Изпрати към групата", use_container_width=True)
         if send and title.strip() and body.strip():
-            execute("INSERT INTO team_messages(academy_id,team_id,sender_user_id,title,body) VALUES(%s,%s,%s,%s,%s)", (ACADEMY_ID,tmap[team],user["id"],title.strip(),body.strip())); st.rerun()
+            with db() as conn, conn.cursor() as cur:
+                cur.execute("DELETE FROM team_messages WHERE academy_id=%s AND team_id=%s", (ACADEMY_ID, tmap[team]))
+                cur.execute("INSERT INTO team_messages(academy_id,team_id,sender_user_id,title,body) VALUES(%s,%s,%s,%s,%s)", (ACADEMY_ID,tmap[team],user["id"],title.strip(),body.strip()))
+            notify_team_parents(tmap[team], "message", title.strip(), body.strip())
+            st.success("Новото съобщение е изпратено и старото е заменено.")
+            st.rerun()
 
     elif sec == "Такси":
         teams = fetchall("SELECT * FROM teams WHERE academy_id=%s AND active ORDER BY birth_year", (ACADEMY_ID,)); tmap = {t["name"]: t for t in teams}; team_name = st.selectbox("Набор", list(tmap)); team = tmap[team_name]
@@ -933,7 +1044,7 @@ def admin_panel(user):
                     VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(player_id,fee_year,fee_month) DO UPDATE SET standard_amount=EXCLUDED.standard_amount,final_amount=EXCLUDED.final_amount,adjustment_reason=EXCLUDED.adjustment_reason,custom_status=EXCLUDED.custom_status""",(ACADEMY_ID,pid,team["id"],int(year),month,amount,custom,reason.strip() or None,"force_majeure" if custom!=amount else None,date(int(year),month,28)))
             st.success("Таксите са начислени."); st.rerun()
 
-    else:
+    elif sec == "Информация":
         with st.form("post_form"):
             title=st.text_input("Заглавие"); body=st.text_area("Текст"); typ=st.radio("Медия",["image","video"],format_func=lambda x:"Снимка" if x=="image" else "Видео линк",horizontal=True); url=st.text_input("URL за видео/снимка"); upload=st.file_uploader("Или качи снимка",type=["jpg","jpeg","png","webp"]); send=st.form_submit_button("Публикувай в родителска информация",use_container_width=True)
         if send and title.strip():
@@ -945,13 +1056,17 @@ def admin_panel(user):
                        VALUES(%s,%s,%s,%s,%s,%s,%s,%s)""",
                     (ACADEMY_ID,title.strip(),body,typ,url.strip() or None,data,mime,user["id"]),
                 )
+            parents = fetchall("SELECT id FROM users WHERE academy_id=%s AND role='parent' AND active AND account_status='approved'", (ACADEMY_ID,))
+            for parent in parents: create_notification(parent["id"], "information", title.strip(), body.strip())
             st.success("Новата информация е публикувана и предишната е заменена.")
             st.rerun()
+    else:
+        notification_center(user)
 
 
 def coach_panel(user):
     coach = fetchone("SELECT * FROM coaches WHERE academy_id=%s AND user_id=%s AND active", (ACADEMY_ID, user["id"]))
-    st.title("Треньорски панел")
+    st.title(f"Треньорски панел  🔔 {unread_notification_count(user['id'])}")
     if not coach:
         st.warning("Този Coach профил още не е свързан с треньор. Admin трябва да го свърже от „Треньори и набори“.")
         return
@@ -960,7 +1075,8 @@ def coach_panel(user):
         st.info("Няма възложени набори към този треньор.")
         return
     st.sidebar.caption(coach["display_name"])
-    sections = ["Табло", "Моите деца", "Тренировки и мачове", "Група за мача", "Присъствие", "Съобщения"]
+    notification_count = unread_notification_count(user["id"])
+    sections = ["Табло", "Моите деца", "Тренировки и мачове", "Група за мача", "Присъствие", "Съобщения", "Обратна връзка", f"Известия ({notification_count})"]
     sec = st.sidebar.radio("Треньорско меню", sections)
     tmap = {t["name"]: t for t in teams}
     team_name = st.selectbox("Избран набор", list(tmap), key="coach_selected_team")
@@ -1024,6 +1140,7 @@ def coach_panel(user):
                                VALUES(%s,%s,%s,%s,%s)""",
                             (ACADEMY_ID, match["id"], player_id, squad_status, user["id"]),
                         )
+                notify_team_parents(team["id"], "match_squad", "Публикувана е група за мача", match_label)
                 st.success("Групата за мача е изпратена към родителите.")
                 st.rerun()
 
@@ -1045,11 +1162,35 @@ def coach_panel(user):
                                ON CONFLICT(event_id,player_id) DO UPDATE SET status=EXCLUDED.status,marked_by=EXCLUDED.marked_by,marked_at=NOW()""",
                             (ACADEMY_ID,event["id"],player_id,status,user["id"]))
                 st.success("Присъствието е запазено.")
-    else:
+    elif sec == "Съобщения":
         with st.form("coach_message_form"):
             title = st.text_input("Заглавие"); body = st.text_area("Съобщение към родителите"); send = st.form_submit_button("Изпрати към групата", use_container_width=True)
         if send and title.strip() and body.strip():
-            execute("INSERT INTO team_messages(academy_id,team_id,sender_user_id,title,body) VALUES(%s,%s,%s,%s,%s)", (ACADEMY_ID,team["id"],user["id"],title.strip(),body.strip())); st.success("Съобщението е изпратено."); st.rerun()
+            with db() as conn, conn.cursor() as cur:
+                cur.execute("DELETE FROM team_messages WHERE academy_id=%s AND team_id=%s", (ACADEMY_ID, team["id"]))
+                cur.execute("INSERT INTO team_messages(academy_id,team_id,sender_user_id,title,body) VALUES(%s,%s,%s,%s,%s)", (ACADEMY_ID,team["id"],user["id"],title.strip(),body.strip()))
+            notify_team_parents(team["id"], "message", title.strip(), body.strip())
+            st.success("Новото съобщение е изпратено и старото е заменено.")
+            st.rerun()
+    elif sec == "Обратна връзка":
+        st.subheader("📝 Обратна връзка от родители")
+        rows = fetchall(
+            """SELECT f.*,u.first_name,u.last_name,p.first_name player_first,p.last_name player_last
+               FROM feedback f JOIN users u ON u.id=f.parent_user_id
+               LEFT JOIN players p ON p.id=f.player_id
+               WHERE f.academy_id=%s AND f.coach_user_id=%s ORDER BY f.created_at DESC""",
+            (ACADEMY_ID, user["id"]),
+        )
+        if not rows: st.info("Няма изпратена обратна връзка.")
+        for row in rows:
+            with st.container(border=True):
+                st.write(f"**{row['subject']}** · {row['feedback_type']}")
+                if row.get("rating"): st.write(f"Оценка: {row['rating']}/5")
+                st.write(row["body"])
+                st.caption(f"За: {row.get('player_first') or ''} {row.get('player_last') or ''} · {row['created_at']:%d.%m.%Y %H:%M}")
+        execute("UPDATE feedback SET is_read=TRUE WHERE academy_id=%s AND coach_user_id=%s", (ACADEMY_ID,user["id"]))
+    else:
+        notification_center(user)
 
 def logout_button():
     if st.sidebar.button("Изход",use_container_width=True): st.session_state.clear(); st.rerun()
