@@ -156,281 +156,23 @@ ACADEMY_ID = init_db()
 
 def apply_style():
     bg = image_data(ASSETS["background"])
-
-    st.markdown(
-        f"""
-        <style>
-        :root {{
-            --gold: #b48a32;
-            --gold-light: #d6b765;
-            --cream: #f8f4ea;
-            --text: #ffffff;
-            --muted: #ddd4c2;
-            --line: rgba(214, 183, 101, 0.48);
-            --glass: rgba(8, 8, 8, 0.54);
-            --glass-strong: rgba(5, 5, 5, 0.72);
-        }}
-
-        /* ОСНОВЕН ФОН */
-        html,
-        body,
-        [data-testid="stAppViewContainer"],
-        .stApp {{
-            background-image:
-                linear-gradient(
-                    rgba(0, 0, 0, 0.48),
-                    rgba(0, 0, 0, 0.68)
-                ),
-                url("{bg}") !important;
-
-            background-size: cover !important;
-            background-position: center center !important;
-            background-repeat: no-repeat !important;
-            background-attachment: fixed !important;
-            color: var(--text) !important;
-        }}
-
-        /* ПРЕМАХВА СТАНДАРТНИТЕ ФОНОВЕ НА STREAMLIT */
-        [data-testid="stAppViewContainer"] > .main {{
-            background: transparent !important;
-        }}
-
-        [data-testid="stHeader"] {{
-            background: rgba(5, 5, 5, 0.60) !important;
-            border-bottom: 1px solid rgba(214, 183, 101, 0.22);
-        }}
-
-        [data-testid="stToolbar"] {{
-            background: transparent !important;
-        }}
-
-        .block-container {{
-            max-width: 1250px;
-            padding-top: 1.4rem;
-            padding-bottom: 4rem;
-        }}
-
-        /* ТЕКСТ */
-        h1,
-        h2,
-        h3,
-        h4,
-        h5,
-        h6,
-        p,
-        label,
-        span,
-        .stMarkdown,
-        [data-testid="stCaptionContainer"] {{
-            color: #ffffff !important;
-        }}
-
-        [data-testid="stCaptionContainer"] p {{
-            color: #d7cfbf !important;
-        }}
-
-        /* SIDEBAR */
-        section[data-testid="stSidebar"] {{
-            background: rgba(6, 6, 6, 0.82) !important;
-            backdrop-filter: blur(16px);
-            -webkit-backdrop-filter: blur(16px);
-            border-right: 1px solid var(--line);
-        }}
-
-        section[data-testid="stSidebar"] > div {{
-            background: transparent !important;
-        }}
-
-        section[data-testid="stSidebar"] label,
-        section[data-testid="stSidebar"] p,
-        section[data-testid="stSidebar"] span {{
-            color: #ffffff !important;
-        }}
-
-        /* ФОРМИ И ПРОЗРАЧНИ ПАНЕЛИ */
-        [data-testid="stForm"],
-        .academy-card,
-        div[data-testid="stVerticalBlockBorderWrapper"] {{
-            background: rgba(8, 8, 8, 0.55) !important;
-            backdrop-filter: blur(13px);
-            -webkit-backdrop-filter: blur(13px);
-            border: 1px solid var(--line) !important;
-            border-radius: 18px !important;
-            box-shadow: 0 15px 38px rgba(0, 0, 0, 0.38);
-        }}
-
-        [data-testid="stForm"] {{
-            padding: 20px;
-        }}
-
-        /* МЕТРИКИ В ADMIN ТАБЛОТО */
-        div[data-testid="stMetric"] {{
-            background: rgba(8, 8, 8, 0.58) !important;
-            backdrop-filter: blur(12px);
-            -webkit-backdrop-filter: blur(12px);
-            border: 1px solid var(--line);
-            border-radius: 18px;
-            padding: 18px;
-            box-shadow: 0 12px 30px rgba(0, 0, 0, 0.32);
-        }}
-
-        div[data-testid="stMetric"] label,
-        div[data-testid="stMetric"] div {{
-            color: #ffffff !important;
-        }}
-
-        /* HERO */
-        .hero {{
-            border-radius: 24px;
-            padding: 28px;
-            background: rgba(5, 5, 5, 0.56);
-            backdrop-filter: blur(12px);
-            -webkit-backdrop-filter: blur(12px);
-            border: 1px solid var(--line);
-            box-shadow: 0 18px 50px rgba(0, 0, 0, 0.42);
-            margin-bottom: 18px;
-            text-align: center;
-        }}
-
-        .hero h1 {{
-            color: #ffffff !important;
-        }}
-
-        /* ПОЛЕТА */
-        div[data-baseweb="input"] > div,
-        div[data-baseweb="select"] > div,
-        div[data-baseweb="base-input"],
-        textarea,
-        input {{
-            background-color: rgba(13, 14, 18, 0.82) !important;
-            color: #ffffff !important;
-            border-color: rgba(214, 183, 101, 0.34) !important;
-        }}
-
-        input::placeholder,
-        textarea::placeholder {{
-            color: rgba(255, 255, 255, 0.55) !important;
-        }}
-
-        /* SELECT И POPOVER */
-        div[data-baseweb="popover"],
-        ul[role="listbox"] {{
-            background: #151515 !important;
-            color: #ffffff !important;
-        }}
-
-        li[role="option"] {{
-            color: #ffffff !important;
-        }}
-
-        /* БУТОНИ */
-        div.stButton > button,
-        div.stDownloadButton > button,
-        button[kind="formSubmit"] {{
-            background:
-                linear-gradient(
-                    135deg,
-                    #956b20,
-                    #d1ad57
-                ) !important;
-
-            color: #ffffff !important;
-            border: 1px solid #e2c777 !important;
-            border-radius: 12px !important;
-            min-height: 44px;
-            font-weight: 800 !important;
-            box-shadow: 0 8px 20px rgba(0, 0, 0, 0.30);
-        }}
-
-        div.stButton > button:hover,
-        div.stDownloadButton > button:hover,
-        button[kind="formSubmit"]:hover {{
-            border-color: #fff0b8 !important;
-            box-shadow: 0 9px 24px rgba(180, 138, 50, 0.38);
-            transform: translateY(-1px);
-        }}
-
-        div.stButton > button[kind="primary"] {{
-            background:
-                linear-gradient(
-                    135deg,
-                    rgba(18, 16, 12, 0.96),
-                    rgba(93, 69, 25, 0.96)
-                ) !important;
-
-            border-color: #d9ba65 !important;
-        }}
-
-        /* TABS */
-        button[data-baseweb="tab"] {{
-            color: #ffffff !important;
-        }}
-
-        button[data-baseweb="tab"][aria-selected="true"] {{
-            border-bottom-color: #d6b765 !important;
-        }}
-
-        /* EXPANDER */
-        [data-testid="stExpander"] {{
-            background: rgba(8, 8, 8, 0.55) !important;
-            border: 1px solid var(--line) !important;
-            border-radius: 14px !important;
-        }}
-
-        [data-testid="stExpander"] summary {{
-            color: #ffffff !important;
-        }}
-
-        /* ALERT BOXES */
-        [data-testid="stAlert"] {{
-            background: rgba(12, 12, 12, 0.75) !important;
-            border: 1px solid rgba(214, 183, 101, 0.42) !important;
-            color: #ffffff !important;
-        }}
-
-        /* РОДИТЕЛСКО МЕНЮ */
-        .st-key-parent_nav div[data-testid="stHorizontalBlock"] {{
-            gap: 8px !important;
-        }}
-
-        .st-key-parent_nav div[data-testid="stButton"] > button {{
-            min-height: 44px !important;
-            font-size: 0.78rem !important;
-        }}
-
-        .muted {{
-            color: #d6cebf !important;
-            font-size: 0.92rem;
-        }}
-
-        .status {{
-            display: inline-block;
-            padding: 5px 10px;
-            border-radius: 999px;
-            background: rgba(180, 138, 50, 0.25);
-            border: 1px solid #d9ba65;
-            color: #ffffff;
-            font-weight: 800;
-        }}
-
-        @media (max-width: 768px) {{
-            .block-container {{
-                padding: 0.8rem 0.7rem 3rem;
-            }}
-
-            .hero {{
-                padding: 16px;
-            }}
-
-            .st-key-parent_nav div[data-testid="stButton"] > button {{
-                font-size: 0.70rem !important;
-                padding: 4px !important;
-            }}
-        }}
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
+    st.markdown(f"""<style>
+    :root{{--gold:#b48a32;--gold2:#d6b765;--cream:#f8f4ea;--ink:#17140e;--line:rgba(180,138,50,.34)}}
+    .stApp{{background:linear-gradient(rgba(249,246,238,.91),rgba(249,246,238,.94)),url('{bg}');background-size:cover;background-position:center;background-attachment:fixed;color:var(--ink)}}
+    .block-container{{max-width:1250px;padding-top:1.2rem;padding-bottom:4rem}}
+    h1,h2,h3{{color:#17140e!important}} p,label,.stMarkdown{{color:#2b261c}}
+    section[data-testid='stSidebar']{{background:rgba(252,249,241,.97);border-right:1px solid var(--line)}}
+    [data-testid='stForm'],.academy-card{{background:rgba(255,255,255,.82);border:1px solid var(--line);border-radius:18px;padding:18px;box-shadow:0 12px 32px rgba(45,34,10,.10)}}
+    div[data-testid='stMetric']{{background:rgba(255,255,255,.86);border:1px solid var(--line);border-radius:18px;padding:16px}}
+    div.stButton>button,div.stDownloadButton>button{{background:linear-gradient(135deg,#9c7427,#d0ae5a)!important;color:white!important;border:1px solid #e4ca86!important;border-radius:12px!important;min-height:44px;font-weight:800!important;box-shadow:0 8px 18px rgba(128,91,22,.2)}}
+    div.stButton>button[kind='primary']{{background:linear-gradient(135deg,#1b1812,#4b3b1d)!important;border-color:#d9ba65!important}}
+    .hero{{border-radius:24px;padding:28px;background:linear-gradient(135deg,rgba(255,255,255,.92),rgba(246,237,215,.84));border:1px solid var(--line);box-shadow:0 18px 50px rgba(37,28,8,.14);margin-bottom:18px;text-align:center}}
+    .muted{{color:#6c624e;font-size:.92rem}}
+    .status{{display:inline-block;padding:5px 10px;border-radius:999px;background:#f4ead0;border:1px solid #d9ba65;font-weight:800}}
+    .st-key-parent_nav div[data-testid='stHorizontalBlock']{{gap:8px!important}}
+    .st-key-parent_nav div[data-testid='stButton']>button{{min-height:42px!important;font-size:.78rem!important}}
+    @media(max-width:768px){{.block-container{{padding:.8rem .7rem 3rem}}.hero{{padding:16px}}.st-key-parent_nav div[data-testid='stButton']>button{{font-size:.70rem!important;padding:4px!important}}}}
+    </style>""", unsafe_allow_html=True)
 
 apply_style()
 
@@ -451,17 +193,14 @@ def public_home():
     hero()
     posts=fetchall("SELECT * FROM public_posts WHERE academy_id=%s AND published ORDER BY created_at DESC LIMIT 12",(ACADEMY_ID,))
     if not posts:
-        st.subheader("Добре дошли в Dyulgerov Academy")
-        st.write(
-            "Публичната начална страница е готова за снимки, "
-            "видеа и новини от администратора."
-        )
-    
-        if ASSETS["coming"].exists():
-            st.image(
-                str(ASSETS["coming"]),
-                use_container_width=True
-            )
+        c1,c2=st.columns([2,1])
+        with c1:
+            st.subheader("Добре дошли в Dyulgerov Academy")
+            st.write("Публичната начална страница е готова за снимки, видеа и новини от администратора.")
+            if ASSETS["coming"].exists(): st.image(str(ASSETS["coming"]),use_container_width=True)
+        with c2:
+            st.subheader("Кодексът на лъвовете")
+            if ASSETS["code"].exists(): st.image(str(ASSETS["code"]),use_container_width=True)
     for post in posts:
         with st.container(border=True):
             if post.get("image_data"): st.image(bytes(post["image_data"]),use_container_width=True)
@@ -621,44 +360,13 @@ def admin_panel(user):
 def logout_button():
     if st.sidebar.button("Изход",use_container_width=True): st.session_state.clear(); st.rerun()
 
-user = current_user()
-
+user=current_user()
 if not user:
     public_home()
-
-    tab1, tab2 = st.tabs([
-        "Вход",
-        "Регистрация на родител"
-    ])
-
-    with tab1:
-        login()
-
-    with tab2:
-        register_parent()
-
-    # ==================================================
-    # КОДЕКС НА ЛЪВОВЕТЕ
-    # ==================================================
-    st.markdown("---")
-    st.markdown(
-        "<h2 style='text-align:center;'>Кодексът на лъвовете</h2>",
-        unsafe_allow_html=True
-    )
-
-    if ASSETS["code"].exists():
-        col_left, col_center, col_right = st.columns([1, 2.2, 1])
-
-        with col_center:
-            st.image(
-                str(ASSETS["code"]),
-                use_container_width=True
-            )
-
+    tab1,tab2=st.tabs(["Вход","Регистрация на родител"])
+    with tab1: login()
+    with tab2: register_parent()
 else:
     logout_button()
-
-    if user["role"] == "admin":
-        admin_panel(user)
-    else:
-        parent_panel(user)
+    if user["role"]=="admin": admin_panel(user)
+    else: parent_panel(user)
