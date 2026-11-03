@@ -451,14 +451,17 @@ def public_home():
     hero()
     posts=fetchall("SELECT * FROM public_posts WHERE academy_id=%s AND published ORDER BY created_at DESC LIMIT 12",(ACADEMY_ID,))
     if not posts:
-        c1,c2=st.columns([2,1])
-        with c1:
-            st.subheader("Добре дошли в Dyulgerov Academy")
-            st.write("Публичната начална страница е готова за снимки, видеа и новини от администратора.")
-            if ASSETS["coming"].exists(): st.image(str(ASSETS["coming"]),use_container_width=True)
-        with c2:
-            st.subheader("Кодексът на лъвовете")
-            if ASSETS["code"].exists(): st.image(str(ASSETS["code"]),use_container_width=True)
+        st.subheader("Добре дошли в Dyulgerov Academy")
+        st.write(
+            "Публичната начална страница е готова за снимки, "
+            "видеа и новини от администратора."
+        )
+    
+        if ASSETS["coming"].exists():
+            st.image(
+                str(ASSETS["coming"]),
+                use_container_width=True
+            )
     for post in posts:
         with st.container(border=True):
             if post.get("image_data"): st.image(bytes(post["image_data"]),use_container_width=True)
@@ -618,13 +621,44 @@ def admin_panel(user):
 def logout_button():
     if st.sidebar.button("Изход",use_container_width=True): st.session_state.clear(); st.rerun()
 
-user=current_user()
+user = current_user()
+
 if not user:
     public_home()
-    tab1,tab2=st.tabs(["Вход","Регистрация на родител"])
-    with tab1: login()
-    with tab2: register_parent()
+
+    tab1, tab2 = st.tabs([
+        "Вход",
+        "Регистрация на родител"
+    ])
+
+    with tab1:
+        login()
+
+    with tab2:
+        register_parent()
+
+    # ==================================================
+    # КОДЕКС НА ЛЪВОВЕТЕ
+    # ==================================================
+    st.markdown("---")
+    st.markdown(
+        "<h2 style='text-align:center;'>Кодексът на лъвовете</h2>",
+        unsafe_allow_html=True
+    )
+
+    if ASSETS["code"].exists():
+        col_left, col_center, col_right = st.columns([1, 2.2, 1])
+
+        with col_center:
+            st.image(
+                str(ASSETS["code"]),
+                use_container_width=True
+            )
+
 else:
     logout_button()
-    if user["role"]=="admin": admin_panel(user)
-    else: parent_panel(user)
+
+    if user["role"] == "admin":
+        admin_panel(user)
+    else:
+        parent_panel(user)
