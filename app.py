@@ -411,13 +411,64 @@ def apply_style():
             border-color: #d9ba65 !important;
         }}
 
-        /* TABS */
+       /* ==================================================
+       PREMIUM TABS
+       ================================================== */
+
+        div[data-baseweb="tab-list"] {{
+            gap: 14px !important;
+            margin-top: 18px !important;
+            margin-bottom: 24px !important;
+        }}
+
         button[data-baseweb="tab"] {{
+            background: rgba(18, 15, 10, 0.90) !important;
+            border: 1px solid rgba(214, 183, 101, 0.70) !important;
+            border-radius: 14px !important;
+
+            min-height: 54px !important;
+            padding: 12px 28px !important;
+
             color: #ffffff !important;
+            font-size: 1rem !important;
+            font-weight: 800 !important;
+
+            box-shadow: 0 8px 20px rgba(0, 0, 0, 0.36) !important;
+        }}
+
+        button[data-baseweb="tab"] p {{
+            color: #ffffff !important;
+            font-size: 1rem !important;
+            font-weight: 800 !important;
+        }}
+
+        button[data-baseweb="tab"]:hover {{
+            background: rgba(112, 81, 27, 0.92) !important;
+            border-color: #efd27a !important;
         }}
 
         button[data-baseweb="tab"][aria-selected="true"] {{
-            border-bottom-color: #d6b765 !important;
+            background: linear-gradient(
+                135deg,
+                #966b20 0%,
+                #d6b454 52%,
+                #a77824 100%
+            ) !important;
+
+            border: 1px solid #f2d67e !important;
+
+            box-shadow:
+                0 10px 26px rgba(0, 0, 0, 0.42),
+                0 0 18px rgba(180, 138, 50, 0.30) !important;
+        }}
+
+        button[data-baseweb="tab"][aria-selected="true"] p {{
+            color: #ffffff !important;
+            font-weight: 900 !important;
+        }}
+
+        div[data-baseweb="tab-highlight"] {{
+            display: none !important;
         }}
 
         /* EXPANDER */
