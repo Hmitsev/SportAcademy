@@ -129,6 +129,12 @@ def init_db():
             title TEXT NOT NULL, body TEXT, media_type TEXT NOT NULL DEFAULT 'image',
             media_url TEXT, image_data BYTEA, image_mime TEXT, published BOOLEAN NOT NULL DEFAULT TRUE,
             created_by BIGINT REFERENCES users(id), created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""",
+        """CREATE TABLE IF NOT EXISTS fan_chat_messages(
+            id BIGSERIAL PRIMARY KEY, academy_id BIGINT NOT NULL REFERENCES academies(id) ON DELETE CASCADE,
+            team_id BIGINT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+            sender_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            body TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""",
+        """CREATE INDEX IF NOT EXISTS idx_fan_chat_team ON fan_chat_messages(academy_id,team_id,created_at DESC)""",
         """CREATE TABLE IF NOT EXISTS feedback(
             id BIGSERIAL PRIMARY KEY, academy_id BIGINT NOT NULL REFERENCES academies(id) ON DELETE CASCADE,
             parent_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -542,9 +548,9 @@ def public_home():
 
 
 def parent_information():
-    st.subheader("ℹ️ Информация от академията")
+    st.subheader("ℹ️ Информационен архив")
     posts = fetchall(
-        "SELECT * FROM public_posts WHERE academy_id=%s AND published ORDER BY created_at DESC LIMIT 50",
+        "SELECT * FROM public_posts WHERE academy_id=%s AND published ORDER BY created_at DESC LIMIT 100",
         (ACADEMY_ID,),
     )
     if not posts:
@@ -555,13 +561,37 @@ def parent_information():
             if post.get("image_data"):
                 st.image(bytes(post["image_data"]), use_container_width=True)
             elif post.get("media_url"):
-                if post["media_type"] == "video":
-                    st.video(post["media_url"])
-                else:
-                    st.image(post["media_url"], use_container_width=True)
+                if post["media_type"] == "video": st.video(post["media_url"])
+                else: st.image(post["media_url"], use_container_width=True)
             st.subheader(post["title"])
             st.write(post.get("body") or "")
             st.caption(post["created_at"].strftime("%d.%m.%Y %H:%M"))
+
+
+def fan_chat(user, team_id):
+    st.subheader("🗣️ ФЕН ЧАТ")
+    st.caption("Чатът е достъпен само за родителите с деца в същия набор.")
+    with st.form(f"fan_chat_form_{team_id}", clear_on_submit=True):
+        body = st.text_area("Ново съобщение", max_chars=1000)
+        send = st.form_submit_button("Изпрати в групата", use_container_width=True)
+    if send and body.strip():
+        execute(
+            "INSERT INTO fan_chat_messages(academy_id,team_id,sender_user_id,body) VALUES(%s,%s,%s,%s)",
+            (ACADEMY_ID,team_id,user["id"],body.strip()),
+        )
+        st.rerun()
+    rows = fetchall(
+        """SELECT f.*,u.first_name,u.last_name FROM fan_chat_messages f
+           JOIN users u ON u.id=f.sender_user_id
+           WHERE f.academy_id=%s AND f.team_id=%s ORDER BY f.created_at DESC LIMIT 100""",
+        (ACADEMY_ID,team_id),
+    )
+    if not rows: st.info("Няма съобщения във ФЕН ЧАТ.")
+    for row in rows:
+        with st.container(border=True):
+            st.write(f"**{row['first_name']} {row['last_name']}**")
+            st.write(row["body"])
+            st.caption(row["created_at"].strftime("%d.%m.%Y %H:%M"))
 
 def register_parent():
     st.subheader("Регистрация на родител")
@@ -600,8 +630,7 @@ def login():
         else: st.session_state.user_id=user["id"]; st.rerun()
 
 def parent_nav():
-    count = unread_notification_count(st.session_state.get("user_id"))
-    items=[("🏠 Начало","Начало"),("📅 Тренировки","Тренировки"),("⚽ Мачове","Мачове"),("💬 Съобщения","Съобщения"),("💰 Такси","Такси"),("💳 Плащане с карта","Карта"),("ℹ️ Информация","Информация"),("📝 Обратна връзка","Обратна връзка"),(f"🔔 Известия ({count})","Известия"),("👤 Настройки","Настройки")]
+    items=[("🏠 Начало","Начало"),("📅 Тренировки","Тренировки"),("⚽ Мачове","Мачове"),("💬 Съобщения","Съобщения"),("💰 Такси","Такси"),("💳 Плащане с карта","Карта"),("ℹ️ Информация","Информация"),("📝 Обратна връзка","Обратна връзка"),("🗣️ ФЕН ЧАТ","ФЕН ЧАТ"),("👤 Настройки","Настройки")]
     st.session_state.setdefault("parent_page","Начало")
     with st.container(key="parent_nav"):
         for start in range(0,len(items),2):
@@ -623,6 +652,11 @@ def parent_panel(user):
     page=st.session_state.parent_page
     if child["approval_status"]!="approved": st.warning("Детето очаква одобрение и свързване с група от администратор.")
     if page=="Начало":
+        unread = unread_notification_count(user["id"])
+        if unread > 0:
+            if st.button(f"🔔 {unread} нови известия", key="home_notification_bell", type="primary"):
+                st.session_state.parent_page = "Известия"
+                st.rerun()
         latest_info = fetchone(
             "SELECT * FROM public_posts WHERE academy_id=%s AND published ORDER BY created_at DESC LIMIT 1",
             (ACADEMY_ID,),
@@ -644,7 +678,7 @@ def parent_panel(user):
         for r in rows:
             with st.container(border=True):
                 st.markdown(
-                    f"<div class='schedule-line'>{r['title']} · {r['starts_at']:%d.%m.%Y %H:%M} · {r.get('location') or 'Без място'}</div>",
+                    f"<div class='schedule-line' style='color:#ff2020!important;font-weight:900!important;font-size:1.12rem!important;text-shadow:0 0 2px #000,0 0 8px rgba(255,0,0,.50);'>{r['title']} · {r['starts_at']:%d.%m.%Y %H:%M} · {r.get('location') or 'Без място'}</div>",
                     unsafe_allow_html=True,
                 )
                 if typ == "match":
@@ -674,6 +708,11 @@ def parent_panel(user):
         parent_information()
     elif page=="Известия":
         notification_center(user)
+    elif page=="ФЕН ЧАТ":
+        if child.get("team_id"):
+            fan_chat(user, child["team_id"])
+        else:
+            st.warning("Детето още не е свързано с набор.")
     elif page=="Обратна връзка":
         st.subheader("📝 Обратна връзка към треньора")
         coach_user = fetchone(
@@ -796,9 +835,12 @@ def coach_account_manager():
 
 def admin_panel(user):
     count = unread_notification_count(user["id"])
-    st.title(f"Административен панел  🔔 {count}")
+    st.title("Административен панел")
+    if count > 0:
+        with st.expander(f"🔔 {count} нови известия", expanded=False):
+            notification_center(user)
     sections = ["Табло", "Регистрации", "Деца и групи", "Треньори и набори", "Роли и права",
-                "Тренировки и мачове", "Съобщения", "Такси", "Информация", "Известия"]
+                "Тренировки и мачове", "Съобщения", "Такси", "Информация"]
     sec = st.sidebar.radio("Админ меню", sections)
 
     if sec == "Табло":
@@ -1023,12 +1065,20 @@ def admin_panel(user):
         with st.form("msg_form"):
             team = st.selectbox("Набор", list(tmap)); title = st.text_input("Заглавие"); body = st.text_area("Съобщение"); send = st.form_submit_button("Изпрати към групата", use_container_width=True)
         if send and title.strip() and body.strip():
-            with db() as conn, conn.cursor() as cur:
-                cur.execute("DELETE FROM team_messages WHERE academy_id=%s AND team_id=%s", (ACADEMY_ID, tmap[team]))
-                cur.execute("INSERT INTO team_messages(academy_id,team_id,sender_user_id,title,body) VALUES(%s,%s,%s,%s,%s)", (ACADEMY_ID,tmap[team],user["id"],title.strip(),body.strip()))
+            execute("INSERT INTO team_messages(academy_id,team_id,sender_user_id,title,body) VALUES(%s,%s,%s,%s,%s)", (ACADEMY_ID,tmap[team],user["id"],title.strip(),body.strip()))
             notify_team_parents(tmap[team], "message", title.strip(), body.strip())
-            st.success("Новото съобщение е изпратено и старото е заменено.")
+            st.success("Съобщението е добавено в архива.")
             st.rerun()
+        st.divider(); st.subheader("Архив на съобщенията")
+        archive_team = st.selectbox("Покажи архив за набор", list(tmap), key="admin_message_archive_team")
+        rows = fetchall("SELECT * FROM team_messages WHERE academy_id=%s AND team_id=%s ORDER BY created_at DESC", (ACADEMY_ID,tmap[archive_team]))
+        for row in rows:
+            with st.container(border=True):
+                st.write(f"**{row['title']}**"); st.write(row['body']); st.caption(row['created_at'].strftime('%d.%m.%Y %H:%M'))
+                if st.button("🗑️ Изтрий това съобщение", key=f"delete_team_message_{row['id']}"):
+                    execute("DELETE FROM team_messages WHERE academy_id=%s AND id=%s", (ACADEMY_ID,row['id']))
+                    st.rerun()
+        if not rows: st.info("Архивът е празен.")
 
     elif sec == "Такси":
         teams = fetchall("SELECT * FROM teams WHERE academy_id=%s AND active ORDER BY birth_year", (ACADEMY_ID,)); tmap = {t["name"]: t for t in teams}; team_name = st.selectbox("Набор", list(tmap)); team = tmap[team_name]
@@ -1046,27 +1096,38 @@ def admin_panel(user):
 
     elif sec == "Информация":
         with st.form("post_form"):
-            title=st.text_input("Заглавие"); body=st.text_area("Текст"); typ=st.radio("Медия",["image","video"],format_func=lambda x:"Снимка" if x=="image" else "Видео линк",horizontal=True); url=st.text_input("URL за видео/снимка"); upload=st.file_uploader("Или качи снимка",type=["jpg","jpeg","png","webp"]); send=st.form_submit_button("Публикувай в родителска информация",use_container_width=True)
+            title=st.text_input("Заглавие"); body=st.text_area("Текст"); typ=st.radio("Медия",["image","video"],format_func=lambda x:"Снимка" if x=="image" else "Видео линк",horizontal=True); url=st.text_input("URL за видео/снимка"); upload=st.file_uploader("Или качи снимка",type=["jpg","jpeg","png","webp"]); send=st.form_submit_button("Добави в информационния архив",use_container_width=True)
         if send and title.strip():
             data=upload.getvalue() if upload else None; mime=upload.type if upload else None
-            with db() as conn, conn.cursor() as cur:
-                cur.execute("DELETE FROM public_posts WHERE academy_id=%s", (ACADEMY_ID,))
-                cur.execute(
-                    """INSERT INTO public_posts(academy_id,title,body,media_type,media_url,image_data,image_mime,created_by)
-                       VALUES(%s,%s,%s,%s,%s,%s,%s,%s)""",
-                    (ACADEMY_ID,title.strip(),body,typ,url.strip() or None,data,mime,user["id"]),
-                )
+            execute(
+                """INSERT INTO public_posts(academy_id,title,body,media_type,media_url,image_data,image_mime,created_by)
+                   VALUES(%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (ACADEMY_ID,title.strip(),body,typ,url.strip() or None,data,mime,user["id"]),
+            )
             parents = fetchall("SELECT id FROM users WHERE academy_id=%s AND role='parent' AND active AND account_status='approved'", (ACADEMY_ID,))
             for parent in parents: create_notification(parent["id"], "information", title.strip(), body.strip())
-            st.success("Новата информация е публикувана и предишната е заменена.")
+            st.success("Информацията е добавена в архива.")
             st.rerun()
+        st.divider(); st.subheader("Информационен архив")
+        posts = fetchall("SELECT * FROM public_posts WHERE academy_id=%s ORDER BY created_at DESC", (ACADEMY_ID,))
+        for post in posts:
+            with st.container(border=True):
+                st.write(f"**{post['title']}**"); st.write(post.get('body') or ''); st.caption(post['created_at'].strftime('%d.%m.%Y %H:%M'))
+                if st.button("🗑️ Изтрий тази информация", key=f"delete_info_{post['id']}"):
+                    execute("DELETE FROM public_posts WHERE academy_id=%s AND id=%s", (ACADEMY_ID,post['id']))
+                    st.rerun()
+        if not posts: st.info("Информационният архив е празен.")
     else:
         notification_center(user)
 
 
 def coach_panel(user):
     coach = fetchone("SELECT * FROM coaches WHERE academy_id=%s AND user_id=%s AND active", (ACADEMY_ID, user["id"]))
-    st.title(f"Треньорски панел  🔔 {unread_notification_count(user['id'])}")
+    st.title("Треньорски панел")
+    coach_unread = unread_notification_count(user["id"])
+    if coach_unread > 0:
+        with st.expander(f"🔔 {coach_unread} нови известия", expanded=False):
+            notification_center(user)
     if not coach:
         st.warning("Този Coach профил още не е свързан с треньор. Admin трябва да го свърже от „Треньори и набори“.")
         return
@@ -1075,8 +1136,7 @@ def coach_panel(user):
         st.info("Няма възложени набори към този треньор.")
         return
     st.sidebar.caption(coach["display_name"])
-    notification_count = unread_notification_count(user["id"])
-    sections = ["Табло", "Моите деца", "Тренировки и мачове", "Група за мача", "Присъствие", "Съобщения", "Обратна връзка", f"Известия ({notification_count})"]
+    sections = ["Табло", "Моите деца", "Тренировки и мачове", "Група за мача", "Присъствие", "Съобщения", "Обратна връзка"]
     sec = st.sidebar.radio("Треньорско меню", sections)
     tmap = {t["name"]: t for t in teams}
     team_name = st.selectbox("Избран набор", list(tmap), key="coach_selected_team")
@@ -1166,12 +1226,19 @@ def coach_panel(user):
         with st.form("coach_message_form"):
             title = st.text_input("Заглавие"); body = st.text_area("Съобщение към родителите"); send = st.form_submit_button("Изпрати към групата", use_container_width=True)
         if send and title.strip() and body.strip():
-            with db() as conn, conn.cursor() as cur:
-                cur.execute("DELETE FROM team_messages WHERE academy_id=%s AND team_id=%s", (ACADEMY_ID, team["id"]))
-                cur.execute("INSERT INTO team_messages(academy_id,team_id,sender_user_id,title,body) VALUES(%s,%s,%s,%s,%s)", (ACADEMY_ID,team["id"],user["id"],title.strip(),body.strip()))
+            execute("INSERT INTO team_messages(academy_id,team_id,sender_user_id,title,body) VALUES(%s,%s,%s,%s,%s)", (ACADEMY_ID,team["id"],user["id"],title.strip(),body.strip()))
             notify_team_parents(team["id"], "message", title.strip(), body.strip())
-            st.success("Новото съобщение е изпратено и старото е заменено.")
+            st.success("Съобщението е добавено в архива.")
             st.rerun()
+        st.divider(); st.subheader("Архив на съобщенията")
+        rows = fetchall("SELECT * FROM team_messages WHERE academy_id=%s AND team_id=%s ORDER BY created_at DESC", (ACADEMY_ID,team["id"]))
+        for row in rows:
+            with st.container(border=True):
+                st.write(f"**{row['title']}**"); st.write(row['body']); st.caption(row['created_at'].strftime('%d.%m.%Y %H:%M'))
+                if row.get("sender_user_id") == user["id"] and st.button("🗑️ Изтрий", key=f"coach_delete_message_{row['id']}"):
+                    execute("DELETE FROM team_messages WHERE academy_id=%s AND id=%s", (ACADEMY_ID,row['id']))
+                    st.rerun()
+
     elif sec == "Обратна връзка":
         st.subheader("📝 Обратна връзка от родители")
         rows = fetchall(
