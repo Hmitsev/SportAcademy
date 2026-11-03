@@ -730,6 +730,30 @@ def admin_panel(user):
                     else:
                         execute("UPDATE users SET role=%s,active=%s WHERE id=%s AND academy_id=%s", (role, active, account["id"], ACADEMY_ID)); st.rerun()
 
+                st.markdown("#### 🔑 Смяна на парола")
+                new_password = st.text_input(
+                    "Нова парола",
+                    type="password",
+                    key=f"new_password_{account['id']}",
+                    placeholder="Минимум 8 символа",
+                )
+                repeat_password = st.text_input(
+                    "Повтори новата парола",
+                    type="password",
+                    key=f"repeat_password_{account['id']}",
+                )
+                if st.button("🔑 Смени паролата", key=f"change_password_{account['id']}", use_container_width=True):
+                    if len(new_password) < 8:
+                        st.error("Новата парола трябва да бъде минимум 8 символа.")
+                    elif new_password != repeat_password:
+                        st.error("Двете пароли не съвпадат.")
+                    else:
+                        execute(
+                            "UPDATE users SET password_hash=%s WHERE id=%s AND academy_id=%s",
+                            (hash_password(new_password), account["id"], ACADEMY_ID),
+                        )
+                        st.success(f"Паролата за {account['email']} е сменена успешно.")
+
     elif sec == "Тренировки и мачове":
         teams = fetchall("SELECT * FROM teams WHERE academy_id=%s AND active ORDER BY birth_year", (ACADEMY_ID,))
         multi_date_event_form("admin_event_form", teams, user["id"])
