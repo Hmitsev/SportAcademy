@@ -538,11 +538,10 @@ def notify_admins(notification_type, title, body=""):
 
 def hero():
     with st.container():
-        st.markdown('<div class="hero">',unsafe_allow_html=True)
-        if ASSETS["logo"].exists(): st.image(str(ASSETS["logo"]),width=190)
+        st.markdown('<div class="hero">', unsafe_allow_html=True)
         st.markdown("# DYULGEROV ACADEMY")
         st.caption("Където успехът е танц на таланта")
-        st.markdown('</div>',unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
 
 def public_home():
     # Стартовата страница показва само идентичността на академията.
