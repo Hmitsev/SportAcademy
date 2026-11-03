@@ -2,6 +2,8 @@ import os
 import io
 import base64
 import hashlib
+import secrets
+import pandas as pd
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -174,6 +176,32 @@ def init_db():
         """CREATE INDEX IF NOT EXISTS idx_players_academy_team ON players(academy_id,team_id)""",
         """CREATE INDEX IF NOT EXISTS idx_events_team_date ON events(academy_id,team_id,starts_at)""",
         """CREATE INDEX IF NOT EXISTS idx_messages_team ON team_messages(academy_id,team_id,created_at DESC)""",
+        """ALTER TABLE player_fees ADD COLUMN IF NOT EXISTS payment_method TEXT""",
+        """ALTER TABLE player_fees ADD COLUMN IF NOT EXISTS payment_note TEXT""",
+        """ALTER TABLE player_fees ADD COLUMN IF NOT EXISTS bank_transfer_date DATE""",
+        """ALTER TABLE player_fees ADD COLUMN IF NOT EXISTS payment_recorded_by BIGINT REFERENCES users(id) ON DELETE SET NULL""",
+        """CREATE TABLE IF NOT EXISTS polls(id BIGSERIAL PRIMARY KEY,academy_id BIGINT NOT NULL REFERENCES academies(id) ON DELETE CASCADE,poll_type TEXT NOT NULL,title TEXT NOT NULL,question TEXT NOT NULL,team_id BIGINT REFERENCES teams(id) ON DELETE CASCADE,event_id BIGINT REFERENCES events(id) ON DELETE CASCADE,active BOOLEAN NOT NULL DEFAULT TRUE,created_by BIGINT REFERENCES users(id) ON DELETE SET NULL,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""",
+        """CREATE TABLE IF NOT EXISTS poll_responses(id BIGSERIAL PRIMARY KEY,academy_id BIGINT NOT NULL REFERENCES academies(id) ON DELETE CASCADE,poll_id BIGINT NOT NULL REFERENCES polls(id) ON DELETE CASCADE,user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,player_id BIGINT REFERENCES players(id) ON DELETE CASCADE,answer TEXT NOT NULL,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""",
+        """CREATE UNIQUE INDEX IF NOT EXISTS uq_poll_response ON poll_responses(poll_id,user_id,COALESCE(player_id,0))""",
+        """CREATE TABLE IF NOT EXISTS expenses(
+            id BIGSERIAL PRIMARY KEY,
+            academy_id BIGINT NOT NULL REFERENCES academies(id) ON DELETE CASCADE,
+            expense_date DATE NOT NULL DEFAULT CURRENT_DATE,
+            category TEXT NOT NULL,
+            amount NUMERIC(12,2) NOT NULL CHECK(amount >= 0),
+            payment_method TEXT NOT NULL DEFAULT 'cash',
+            description TEXT,
+            created_by BIGINT REFERENCES users(id) ON DELETE SET NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""",
+        """CREATE INDEX IF NOT EXISTS idx_expenses_academy_date ON expenses(academy_id,expense_date DESC)""",
+        """CREATE TABLE IF NOT EXISTS login_sessions(
+            id BIGSERIAL PRIMARY KEY,
+            academy_id BIGINT NOT NULL REFERENCES academies(id) ON DELETE CASCADE,
+            user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            token_hash TEXT NOT NULL UNIQUE,
+            last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""",
+        """CREATE INDEX IF NOT EXISTS idx_login_sessions_token ON login_sessions(token_hash,last_seen)""",
         """CREATE INDEX IF NOT EXISTS idx_fees_player ON player_fees(academy_id,player_id,fee_year,fee_month)""",
     ]
     with db() as conn, conn.cursor() as cur:
@@ -403,13 +431,64 @@ def apply_style():
             border-color: #d9ba65 !important;
         }}
 
-        /* TABS */
+       /* ==================================================
+       PREMIUM TABS
+       ================================================== */
+
+        div[data-baseweb="tab-list"] {{
+            gap: 14px !important;
+            margin-top: 18px !important;
+            margin-bottom: 24px !important;
+        }}
+
         button[data-baseweb="tab"] {{
+            background: rgba(18, 15, 10, 0.90) !important;
+            border: 1px solid rgba(214, 183, 101, 0.70) !important;
+            border-radius: 14px !important;
+
+            min-height: 54px !important;
+            padding: 12px 28px !important;
+
             color: #ffffff !important;
+            font-size: 1rem !important;
+            font-weight: 800 !important;
+
+            box-shadow: 0 8px 20px rgba(0, 0, 0, 0.36) !important;
+        }}
+
+        button[data-baseweb="tab"] p {{
+            color: #ffffff !important;
+            font-size: 1rem !important;
+            font-weight: 800 !important;
+        }}
+
+        button[data-baseweb="tab"]:hover {{
+            background: rgba(112, 81, 27, 0.92) !important;
+            border-color: #efd27a !important;
         }}
 
         button[data-baseweb="tab"][aria-selected="true"] {{
-            border-bottom-color: #d6b765 !important;
+            background: linear-gradient(
+                135deg,
+                #966b20 0%,
+                #d6b454 52%,
+                #a77824 100%
+            ) !important;
+
+            border: 1px solid #f2d67e !important;
+
+            box-shadow:
+                0 10px 26px rgba(0, 0, 0, 0.42),
+                0 0 18px rgba(180, 138, 50, 0.30) !important;
+        }}
+
+        button[data-baseweb="tab"][aria-selected="true"] p {{
+            color: #ffffff !important;
+            font-weight: 900 !important;
+        }}
+
+        div[data-baseweb="tab-highlight"] {{
+            display: none !important;
         }}
 
         /* EXPANDER */
@@ -455,6 +534,13 @@ def apply_style():
             font-weight: 800;
         }}
 
+        .st-key-parent_nav {{
+            margin-top: 72px !important;
+        }}
+        
+        [data-testid="stSidebar"] [data-testid="stRadio"] {{
+            margin-top: 18px !important;
+        }}
         @media (max-width: 768px) {{
             .block-container {{
                 padding: 0.8rem 0.7rem 3rem;
@@ -477,9 +563,46 @@ def apply_style():
 apply_style()
 
 def academy(): return fetchone("SELECT * FROM academies WHERE id=%s",(ACADEMY_ID,))
+def session_token_hash(token):
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def create_login_session(user_id):
+    token = secrets.token_urlsafe(32)
+    execute(
+        "INSERT INTO login_sessions(academy_id,user_id,token_hash,last_seen) VALUES(%s,%s,%s,NOW())",
+        (ACADEMY_ID, user_id, session_token_hash(token)),
+    )
+    st.session_state.user_id = user_id
+    st.session_state.login_token = token
+    st.query_params["session"] = token
+
+
 def current_user():
-    uid=st.session_state.get("user_id")
-    return fetchone("SELECT * FROM users WHERE id=%s AND academy_id=%s",(uid,ACADEMY_ID)) if uid else None
+    uid = st.session_state.get("user_id")
+    token = st.session_state.get("login_token") or st.query_params.get("session")
+    if not token:
+        return fetchone("SELECT * FROM users WHERE id=%s AND academy_id=%s", (uid, ACADEMY_ID)) if uid else None
+
+    session = fetchone(
+        """SELECT ls.user_id,u.* FROM login_sessions ls
+           JOIN users u ON u.id=ls.user_id
+           WHERE ls.academy_id=%s AND ls.token_hash=%s
+             AND ls.last_seen >= NOW() - INTERVAL '5 minutes'
+             AND u.active AND u.account_status='approved'""",
+        (ACADEMY_ID, session_token_hash(token)),
+    )
+    if not session:
+        execute("DELETE FROM login_sessions WHERE token_hash=%s", (session_token_hash(token),))
+        st.session_state.pop("user_id", None)
+        st.session_state.pop("login_token", None)
+        st.query_params.pop("session", None)
+        return None
+
+    execute("UPDATE login_sessions SET last_seen=NOW() WHERE token_hash=%s", (session_token_hash(token),))
+    st.session_state.user_id = session["id"]
+    st.session_state.login_token = token
+    return session
 
 def create_notification(user_id, notification_type, title, body=""):
     execute(
@@ -538,11 +661,10 @@ def notify_admins(notification_type, title, body=""):
 
 def hero():
     with st.container():
-        st.markdown('<div class="hero">',unsafe_allow_html=True)
-        if ASSETS["logo"].exists(): st.image(str(ASSETS["logo"]),width=190)
+        st.markdown('<div class="hero">', unsafe_allow_html=True)
         st.markdown("# DYULGEROV ACADEMY")
         st.caption("Където успехът е танц на таланта")
-        st.markdown('</div>',unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
 
 def public_home():
     # Стартовата страница показва само идентичността на академията.
@@ -550,8 +672,10 @@ def public_home():
     hero()
 
 
-def parent_information():
+def parent_information(user=None):
     st.subheader("ℹ️ Информационен архив")
+    if user:
+        for poll in fetchall("SELECT * FROM polls WHERE academy_id=%s AND poll_type='global' AND active ORDER BY created_at DESC",(ACADEMY_ID,)):render_poll(poll,user)
     posts = fetchall(
         "SELECT * FROM public_posts WHERE academy_id=%s AND published ORDER BY created_at DESC LIMIT 100",
         (ACADEMY_ID,),
@@ -635,6 +759,140 @@ def fan_chat(user, team_id):
                 st.image(bytes(row["image_data"]), use_container_width=True)
             st.caption(row["created_at"].strftime("%d.%m.%Y %H:%M"))
 
+
+def render_poll(poll,user,child=None):
+    pid=child["id"] if child else None
+    old=fetchone("SELECT answer FROM poll_responses WHERE poll_id=%s AND user_id=%s AND player_id IS NOT DISTINCT FROM %s",(poll["id"],user["id"],pid))
+    with st.container(border=True):
+        st.write(f"**📊 {poll['title']}**"); st.write(poll["question"])
+        vals=["yes","no","maybe"]
+        ans=st.radio("Избор",vals,index=vals.index(old["answer"]) if old and old["answer"] in vals else 0,format_func=lambda x:{"yes":"Да","no":"Не","maybe":"Не съм сигурен/а"}[x],horizontal=True,key=f"poll_{poll['id']}_{pid or 0}")
+        if st.button("Запази отговора",key=f"poll_save_{poll['id']}_{pid or 0}",use_container_width=True):
+            execute("""INSERT INTO poll_responses(academy_id,poll_id,user_id,player_id,answer) VALUES(%s,%s,%s,%s,%s) ON CONFLICT (poll_id,user_id,(COALESCE(player_id,0))) DO UPDATE SET answer=EXCLUDED.answer,created_at=NOW()""",(ACADEMY_ID,poll["id"],user["id"],pid,ans)); st.success("Отговорът е записан.")
+
+def payment_rows(team_id=None):
+    extra=" AND pf.team_id=%s" if team_id else ""; params=(ACADEMY_ID,team_id) if team_id else (ACADEMY_ID,)
+    return fetchall(f"""SELECT pf.id fee_id,t.name team_name,p.first_name,p.last_name,pf.fee_month,pf.fee_year,pf.final_amount,pf.status,pf.payment_method,pf.bank_transfer_date,pf.payment_note,pf.paid_at FROM player_fees pf JOIN players p ON p.id=pf.player_id LEFT JOIN teams t ON t.id=pf.team_id WHERE pf.academy_id=%s {extra} ORDER BY t.birth_year,p.last_name,p.first_name,pf.fee_year DESC,pf.fee_month DESC""",params)
+
+def payment_excel(rows):
+    names={"cash":"В брой","bank":"По банка","card":"Карта","other":"Друго"}; data=[]
+    for r in rows:data.append({"Набор":r.get("team_name") or "","Дете":f"{r['first_name']} {r['last_name']}","Месец":r["fee_month"],"Година":r["fee_year"],"Сума EUR":float(r["final_amount"]),"Статус":"Платена" if r["status"]=="paid" else "Дължима","Плащане":names.get(r.get("payment_method"),r.get("payment_method") or ""),"Дата превод":r.get("bank_transfer_date"),"Бележка":r.get("payment_note") or "","Платено на":r.get("paid_at")})
+    b=io.BytesIO()
+    with pd.ExcelWriter(b,engine="openpyxl") as w:
+        pd.DataFrame(data).to_excel(w,index=False,sheet_name="Плащания"); ws=w.book["Плащания"]; ws.freeze_panes="A2"; ws.auto_filter.ref=ws.dimensions
+        for c in ws.columns:ws.column_dimensions[c[0].column_letter].width=min(max(len(str(x.value or "")) for x in c)+2,32)
+    return b.getvalue()
+
+def payment_panel(user,team_ids=None):
+    teams=fetchall("SELECT * FROM teams WHERE academy_id=%s AND active ORDER BY birth_year",(ACADEMY_ID,)); teams=[t for t in teams if team_ids is None or t["id"] in team_ids]
+    if not teams:st.info("Няма набори.");return
+    m={t["name"]:t for t in teams}; team=m[st.selectbox("Набор",list(m),key=f"fee_team_{user['id']}")]
+    for r in payment_rows(team["id"]):
+        icon="🟢" if r["status"]=="paid" else "🔴"
+        with st.expander(f"{icon} {r['first_name']} {r['last_name']} · {r['fee_month']:02d}.{r['fee_year']} · {r['final_amount']:.2f} EUR"):
+            method=st.selectbox("Начин",["cash","bank","card","other"],format_func=lambda x:{"cash":"В брой","bank":"По банка","card":"Карта","other":"Друго"}[x],key=f"pm_{user['id']}_{r['fee_id']}")
+            note=st.text_input("Бележка",key=f"pn_{user['id']}_{r['fee_id']}")
+            if st.button("Отбележи като платена",key=f"pp_{user['id']}_{r['fee_id']}",use_container_width=True):execute("UPDATE player_fees SET status='paid',payment_method=%s,payment_note=%s,payment_recorded_by=%s,paid_at=NOW() WHERE id=%s AND academy_id=%s",(method,note.strip() or None,user["id"],r["fee_id"],ACADEMY_ID));st.rerun()
+    st.download_button("📥 Excel: всички набори и деца",payment_excel(payment_rows()),"academy_payments.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True)
+
+def financial_summary_rows():
+    income = fetchall(
+        """SELECT COALESCE(payment_method,'other') payment_method,
+                  COALESCE(SUM(final_amount),0) total
+           FROM player_fees
+           WHERE academy_id=%s AND status='paid'
+           GROUP BY COALESCE(payment_method,'other')""",
+        (ACADEMY_ID,),
+    )
+    expenses = fetchall(
+        """SELECT payment_method,COALESCE(SUM(amount),0) total
+           FROM expenses WHERE academy_id=%s GROUP BY payment_method""",
+        (ACADEMY_ID,),
+    )
+    income_map = {r["payment_method"]: float(r["total"]) for r in income}
+    expense_map = {r["payment_method"]: float(r["total"]) for r in expenses}
+    return income_map, expense_map
+
+
+def financial_report_excel():
+    income_map, expense_map = financial_summary_rows()
+    methods = [("bank","По банка"),("cash","В брой"),("card","Карта"),("other","Друго")]
+    rows=[]
+    for key,label in methods:
+        inc=income_map.get(key,0.0); exp=expense_map.get(key,0.0)
+        rows.append({"Начин":label,"Приход EUR":inc,"Разход EUR":exp,"Нетно EUR":inc-exp})
+    total_income=sum(income_map.values()); total_expense=sum(expense_map.values())
+    rows.append({"Начин":"ТОТАЛ","Приход EUR":total_income,"Разход EUR":total_expense,"Нетно EUR":total_income-total_expense})
+    details = fetchall(
+        "SELECT expense_date,category,amount,payment_method,description,created_at FROM expenses WHERE academy_id=%s ORDER BY expense_date DESC,created_at DESC",
+        (ACADEMY_ID,),
+    )
+    method_names={"cash":"В брой","bank":"По банка","card":"Карта","other":"Друго"}
+    detail_rows=[{"Дата":r["expense_date"],"Категория":r["category"],"Сума EUR":float(r["amount"]),"Начин":method_names.get(r["payment_method"],r["payment_method"]),"Описание":r.get("description") or ""} for r in details]
+    out=io.BytesIO()
+    with pd.ExcelWriter(out,engine="openpyxl") as writer:
+        pd.DataFrame(rows).to_excel(writer,index=False,sheet_name="Финансова справка")
+        pd.DataFrame(detail_rows).to_excel(writer,index=False,sheet_name="Разходи")
+        for ws in writer.book.worksheets:
+            ws.freeze_panes="A2"; ws.auto_filter.ref=ws.dimensions
+            for col in ws.columns:
+                ws.column_dimensions[col[0].column_letter].width=min(max(len(str(c.value or "")) for c in col)+2,35)
+    return out.getvalue()
+
+
+def financial_dashboard():
+    income_map, expense_map = financial_summary_rows()
+    bank=income_map.get("bank",0.0); cash=income_map.get("cash",0.0); card=income_map.get("card",0.0)
+    expenses_total=sum(expense_map.values()); total_income=sum(income_map.values()); net=total_income-expenses_total
+    st.subheader("Финансово табло")
+    cols=st.columns(5)
+    cols[0].metric("По банка",f"{bank:.2f} EUR")
+    cols[1].metric("В брой",f"{cash:.2f} EUR")
+    cols[2].metric("Карта",f"{card:.2f} EUR")
+    cols[3].metric("Разход",f"{expenses_total:.2f} EUR")
+    cols[4].metric("Тотал",f"{net:.2f} EUR",help="Общи приходи минус общи разходи")
+    st.download_button(
+        "📥 Изтегли само финансовата справка",
+        financial_report_excel(),
+        "academy_financial_report.xlsx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+        key="download_financial_summary",
+    )
+
+
+def expense_panel(user):
+    st.subheader("Нов разход")
+    with st.form("expense_form", clear_on_submit=True):
+        expense_date=st.date_input("Дата",date.today())
+        category=st.selectbox("Категория",["Наем","Консумативи","Други"])
+        amount=st.number_input("Сума (€)",0.0,1000000.0,0.0,0.01)
+        payment_method=st.selectbox("Начин",["cash","bank","card"],format_func=lambda x:{"cash":"В брой","bank":"По банка","card":"Карта"}[x])
+        description=st.text_area("Описание")
+        save=st.form_submit_button("Добави разход",use_container_width=True)
+    if save:
+        if amount <= 0:
+            st.error("Сумата трябва да е по-голяма от 0.")
+        else:
+            execute(
+                "INSERT INTO expenses(academy_id,expense_date,category,amount,payment_method,description,created_by) VALUES(%s,%s,%s,%s,%s,%s,%s)",
+                (ACADEMY_ID,expense_date,category,amount,payment_method,description.strip() or None,user["id"]),
+            )
+            st.success("Разходът е добавен.")
+            st.rerun()
+    st.subheader("Архив на разходите")
+    rows=fetchall("SELECT * FROM expenses WHERE academy_id=%s ORDER BY expense_date DESC,created_at DESC",(ACADEMY_ID,))
+    names={"cash":"В брой","bank":"По банка","card":"Карта"}
+    for row in rows:
+        with st.container(border=True):
+            c1,c2=st.columns([5,1])
+            c1.write(f"**{row['expense_date']:%d.%m.%Y} · {row['category']} · {row['amount']:.2f} EUR · {names.get(row['payment_method'],row['payment_method'])}**")
+            if row.get("description"): c1.write(row["description"])
+            if c2.button("🗑️",key=f"delete_expense_{row['id']}"):
+                execute("DELETE FROM expenses WHERE academy_id=%s AND id=%s",(ACADEMY_ID,row["id"])); st.rerun()
+    if not rows: st.info("Няма въведени разходи.")
+
+
 def register_parent():
     st.subheader("Регистрация на родител")
     child_count=st.number_input("Брой деца за добавяне сега",1,5,1)
@@ -669,10 +927,12 @@ def login():
         if not user or user["password_hash"]!=hash_password(pw): st.error("Невалиден имейл или парола.")
         elif not user["active"]: st.error("Профилът е деактивиран.")
         elif user["account_status"]!="approved": st.warning("Профилът очаква одобрение от академията.")
-        else: st.session_state.user_id=user["id"]; st.rerun()
+        else:
+            create_login_session(user["id"])
+            st.rerun()
 
 def parent_nav():
-    items=[("🏠 Начало","Начало"),("📅 Тренировки","Тренировки"),("⚽ Мачове","Мачове"),("💬 Съобщения","Съобщения"),("💰 Такси","Такси"),("💳 Плащане с карта","Карта"),("ℹ️ Информация","Информация"),("📝 Обратна връзка","Обратна връзка"),("🗣️ ФЕН ЧАТ","ФЕН ЧАТ"),("👤 Настройки","Настройки")]
+    items=[("🏠 Начало","Начало"),("📅 Тренировки","Тренировки"),("⚽ Мачове","Мачове"),("💬 Съобщение от треньор","Съобщения"),("💰 Такси и плащане","Такси"),("ℹ️ Информация","Информация"),("📝 Обратна връзка","Обратна връзка"),("🗣️ ФЕН ЧАТ","ФЕН ЧАТ"),("👤 Настройки","Настройки")]
     st.session_state.setdefault("parent_page","Начало")
     with st.container(key="parent_nav"):
         for start in range(0,len(items),2):
@@ -735,6 +995,8 @@ def parent_panel(user):
                             st.warning("🔴 Детето не е в групата за този мач.")
                     else:
                         st.caption("Треньорът още не е публикувал група за този мач.")
+                    poll=fetchone("SELECT * FROM polls WHERE academy_id=%s AND event_id=%s AND active ORDER BY created_at DESC LIMIT 1",(ACADEMY_ID,r["id"]))
+                    if poll and squad and squad["squad_status"]=="in_group":render_poll(poll,user,child)
         if not rows: st.info("Няма добавени записи.")
     elif page=="Съобщения":
         rows=fetchall("SELECT * FROM team_messages WHERE academy_id=%s AND team_id=%s ORDER BY created_at DESC",(ACADEMY_ID,child.get("team_id"))) if child.get("team_id") else []
@@ -743,11 +1005,20 @@ def parent_panel(user):
         if not rows: st.info("Няма съобщения.")
     elif page=="Такси":
         rows=fetchall("SELECT * FROM player_fees WHERE academy_id=%s AND player_id=%s ORDER BY fee_year DESC,fee_month DESC",(ACADEMY_ID,child["id"]))
-        for r in rows: st.write(f"{r['fee_month']:02d}.{r['fee_year']} · **{r['final_amount']:.2f} EUR** · {r['status']} · {r.get('adjustment_reason') or ''}")
-        if not rows: st.info("Няма начислени такси.")
-    elif page=="Карта": st.warning("Плащането с карта е подготвено като модул и очаква избор на платежен доставчик и договор.")
+        for r in rows:
+            paid=r["status"]=="paid"; icon="🟢" if paid else "🔴"; label="ПЛАТЕНА" if paid else "ДЪЛЖИМА"
+            with st.expander(f"{icon} {r['fee_month']:02d}.{r['fee_year']} · {r['final_amount']:.2f} EUR · {label}"):
+                st.write(f"**{icon} {label}**")
+                if not paid:
+                    method=st.radio("Начин на плащане",["cash","bank","card"],format_func=lambda x:{"cash":"В брой","bank":"По банка","card":"С карта"}[x],horizontal=True,key=f"choice_{r['id']}")
+                    if method=="bank":
+                        d=st.date_input("Дата на превода",date.today(),key=f"bd_{r['id']}")
+                        if st.button("Изпрати информацията",key=f"bs_{r['id']}",use_container_width=True):execute("UPDATE player_fees SET payment_method='bank',bank_transfer_date=%s,payment_note='Заявено от родител' WHERE id=%s",(d,r["id"]));notify_admins("bank_payment","Заявен банков превод",f"{child['first_name']} {child['last_name']} · {d:%d.%m.%Y}");st.success("Изпратено. Администраторът трябва да потвърди плащането.")
+                    elif method=="cash":st.info("Плащането в брой се потвърждава от треньор или администратор.")
+                    else:st.info("Плащането с карта предстои.")
+        if not rows:st.info("Няма начислени такси.")
     elif page=="Информация":
-        parent_information()
+        parent_information(user)
     elif page=="Известия":
         notification_center(user)
     elif page=="ФЕН ЧАТ":
@@ -1123,22 +1394,39 @@ def admin_panel(user):
         if not rows: st.info("Архивът е празен.")
 
     elif sec == "Такси":
-        teams = fetchall("SELECT * FROM teams WHERE academy_id=%s AND active ORDER BY birth_year", (ACADEMY_ID,)); tmap = {t["name"]: t for t in teams}; team_name = st.selectbox("Набор", list(tmap)); team = tmap[team_name]
-        default = fetchone("SELECT amount FROM fee_templates WHERE academy_id=%s AND team_id=%s", (ACADEMY_ID,team["id"])); amount = st.number_input("Стандартна сума EUR",0.0,1000.0,float(default["amount"] if default else 50),.01); month = st.selectbox("Месец",range(1,13),index=date.today().month-1); year = st.number_input("Година",2024,2045,date.today().year)
-        players = fetchall("SELECT * FROM players WHERE academy_id=%s AND team_id=%s AND approval_status='approved' ORDER BY first_name", (ACADEMY_ID,team["id"])); selected = {}
-        for player in players:
-            c1,c2,c3=st.columns([1,4,2]); use=c1.checkbox("",True,key=f"fu{player['id']}"); c2.write(f"{player['first_name']} {player['last_name']}"); custom=c3.number_input("Индивидуална",0.0,1000.0,float(amount),.01,key=f"fa{player['id']}"); selected[player["id"]]=(use,custom)
-        reason=st.text_input("Основание за индивидуални корекции",placeholder="Отстъпка за второ/трето дете или форсмажор")
-        if st.button("Начисли на маркираните деца",type="primary",use_container_width=True):
-            execute("INSERT INTO fee_templates(academy_id,team_id,amount) VALUES(%s,%s,%s) ON CONFLICT(academy_id,team_id) DO UPDATE SET amount=EXCLUDED.amount",(ACADEMY_ID,team["id"],amount))
-            for pid,(use,custom) in selected.items():
-                if use: execute("""INSERT INTO player_fees(academy_id,player_id,team_id,fee_year,fee_month,standard_amount,final_amount,adjustment_reason,custom_status,due_date)
-                    VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(player_id,fee_year,fee_month) DO UPDATE SET standard_amount=EXCLUDED.standard_amount,final_amount=EXCLUDED.final_amount,adjustment_reason=EXCLUDED.adjustment_reason,custom_status=EXCLUDED.custom_status""",(ACADEMY_ID,pid,team["id"],int(year),month,amount,custom,reason.strip() or None,"force_majeure" if custom!=amount else None,date(int(year),month,28)))
-            st.success("Таксите са начислени."); st.rerun()
+        st.session_state.setdefault("admin_fee_page", "Начисляване")
+        b1,b2,b3=st.columns(3)
+        if b1.button("💰 Начисляване",use_container_width=True,type="primary" if st.session_state.admin_fee_page=="Начисляване" else "secondary"):
+            st.session_state.admin_fee_page="Начисляване"; st.rerun()
+        if b2.button("📊 Справка и плащания",use_container_width=True,type="primary" if st.session_state.admin_fee_page=="Справка" else "secondary"):
+            st.session_state.admin_fee_page="Справка"; st.rerun()
+        if b3.button("🧾 Разход",use_container_width=True,type="primary" if st.session_state.admin_fee_page=="Разход" else "secondary"):
+            st.session_state.admin_fee_page="Разход"; st.rerun()
+
+        fee_page=st.session_state.admin_fee_page
+        if fee_page == "Начисляване":
+            teams = fetchall("SELECT * FROM teams WHERE academy_id=%s AND active ORDER BY birth_year", (ACADEMY_ID,)); tmap = {t["name"]: t for t in teams}; team_name = st.selectbox("Набор", list(tmap)); team = tmap[team_name]
+            default = fetchone("SELECT amount FROM fee_templates WHERE academy_id=%s AND team_id=%s", (ACADEMY_ID,team["id"])); amount = st.number_input("Стандартна сума EUR",0.0,1000.0,float(default["amount"] if default else 50),.01); month = st.selectbox("Месец",range(1,13),index=date.today().month-1); year = st.number_input("Година",2024,2045,date.today().year)
+            players = fetchall("SELECT * FROM players WHERE academy_id=%s AND team_id=%s AND approval_status='approved' ORDER BY first_name", (ACADEMY_ID,team["id"])); selected = {}
+            for player in players:
+                c1,c2,c3=st.columns([1,4,2]); use=c1.checkbox("",True,key=f"fu{player['id']}"); c2.write(f"{player['first_name']} {player['last_name']}"); custom=c3.number_input("Индивидуална",0.0,1000.0,float(amount),.01,key=f"fa{player['id']}"); selected[player["id"]]=(use,custom)
+            reason=st.text_input("Основание за индивидуални корекции",placeholder="Отстъпка за второ/трето дете или форсмажор")
+            if st.button("Начисли на маркираните деца",type="primary",use_container_width=True):
+                execute("INSERT INTO fee_templates(academy_id,team_id,amount) VALUES(%s,%s,%s) ON CONFLICT(academy_id,team_id) DO UPDATE SET amount=EXCLUDED.amount",(ACADEMY_ID,team["id"],amount))
+                for pid,(use,custom) in selected.items():
+                    if use: execute("""INSERT INTO player_fees(academy_id,player_id,team_id,fee_year,fee_month,standard_amount,final_amount,adjustment_reason,custom_status,due_date)
+                        VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(player_id,fee_year,fee_month) DO UPDATE SET standard_amount=EXCLUDED.standard_amount,final_amount=EXCLUDED.final_amount,adjustment_reason=EXCLUDED.adjustment_reason,custom_status=EXCLUDED.custom_status""",(ACADEMY_ID,pid,team["id"],int(year),month,amount,custom,reason.strip() or None,"force_majeure" if custom!=amount else None,date(int(year),month,28)))
+                st.success("Таксите са начислени."); st.rerun()
+        elif fee_page == "Справка":
+            payment_panel(user)
+            st.divider()
+            financial_dashboard()
+        else:
+            expense_panel(user)
 
     elif sec == "Информация":
         with st.form("post_form"):
-            title=st.text_input("Заглавие"); body=st.text_area("Текст"); typ=st.radio("Медия",["image","video"],format_func=lambda x:"Снимка" if x=="image" else "Видео линк",horizontal=True); url=st.text_input("URL за видео/снимка"); upload=st.file_uploader("Или качи снимка",type=["jpg","jpeg","png","webp"]); send=st.form_submit_button("Добави в информационния архив",use_container_width=True)
+            title=st.text_input("Заглавие"); body=st.text_area("Текст"); typ=st.radio("Медия",["image","video"],format_func=lambda x:"Снимка" if x=="image" else "Видео линк",horizontal=True); url=st.text_input("URL за видео/снимка"); upload=st.file_uploader("Или качи снимка",type=["jpg","jpeg","png","webp"]); add_poll=st.checkbox("📊 Добави глобална анкета"); poll_question=st.text_input("Въпрос на анкетата") if add_poll else ""; send=st.form_submit_button("Добави в информационния архив",use_container_width=True)
         if send and title.strip():
             data=upload.getvalue() if upload else None; mime=upload.type if upload else None
             execute(
@@ -1146,6 +1434,7 @@ def admin_panel(user):
                    VALUES(%s,%s,%s,%s,%s,%s,%s,%s)""",
                 (ACADEMY_ID,title.strip(),body,typ,url.strip() or None,data,mime,user["id"]),
             )
+            if add_poll and poll_question.strip():execute("INSERT INTO polls(academy_id,poll_type,title,question,created_by) VALUES(%s,'global',%s,%s,%s)",(ACADEMY_ID,title.strip(),poll_question.strip(),user["id"]))
             parents = fetchall("SELECT id FROM users WHERE academy_id=%s AND role='parent' AND active AND account_status='approved'", (ACADEMY_ID,))
             for parent in parents: create_notification(parent["id"], "information", title.strip(), body.strip())
             st.success("Информацията е добавена в архива.")
@@ -1178,7 +1467,7 @@ def coach_panel(user):
         st.info("Няма възложени набори към този треньор.")
         return
     st.sidebar.caption(coach["display_name"])
-    sections = ["Табло", "Моите деца", "Тренировки и мачове", "Група за мача", "Присъствие", "Съобщения", "Обратна връзка"]
+    sections = ["Табло", "Моите деца", "Тренировки и мачове", "Група за мача", "Присъствие", "Такси", "Съобщения", "Обратна връзка"]
     sec = st.sidebar.radio("Треньорско меню", sections)
     tmap = {t["name"]: t for t in teams}
     team_name = st.selectbox("Избран набор", list(tmap), key="coach_selected_team")
@@ -1229,6 +1518,7 @@ def coach_panel(user):
                         format_func=lambda x: "В групата" if x == "in_group" else "Не е в групата",
                         key=f"squad_{match['id']}_{player['id']}",
                     )
+                create_match_poll=st.checkbox("📊 Анкета за присъствие на мача",key=f"match_poll_{match['id']}")
                 publish_squad = st.form_submit_button("Изпрати групата към родителите", use_container_width=True)
             if publish_squad:
                 with db() as conn, conn.cursor() as cur:
@@ -1242,6 +1532,9 @@ def coach_panel(user):
                                VALUES(%s,%s,%s,%s,%s)""",
                             (ACADEMY_ID, match["id"], player_id, squad_status, user["id"]),
                         )
+                if create_match_poll:
+                    execute("UPDATE polls SET active=FALSE WHERE academy_id=%s AND event_id=%s",(ACADEMY_ID,match["id"]))
+                    execute("INSERT INTO polls(academy_id,poll_type,title,question,team_id,event_id,created_by) VALUES(%s,'match_attendance',%s,%s,%s,%s,%s)",(ACADEMY_ID,"Присъствие на мача",f"Ще присъства ли детето на {match_label}?",team["id"],match["id"],user["id"]))
                 notify_team_parents(team["id"], "match_squad", "Публикувана е група за мача", match_label)
                 st.success("Групата за мача е изпратена към родителите.")
                 st.rerun()
@@ -1264,6 +1557,8 @@ def coach_panel(user):
                                ON CONFLICT(event_id,player_id) DO UPDATE SET status=EXCLUDED.status,marked_by=EXCLUDED.marked_by,marked_at=NOW()""",
                             (ACADEMY_ID,event["id"],player_id,status,user["id"]))
                 st.success("Присъствието е запазено.")
+    elif sec == "Такси":
+        payment_panel(user,[t["id"] for t in teams])
     elif sec == "Съобщения":
         with st.form("coach_message_form"):
             title = st.text_input("Заглавие"); body = st.text_area("Съобщение към родителите"); send = st.form_submit_button("Изпрати към групата", use_container_width=True)
@@ -1302,7 +1597,13 @@ def coach_panel(user):
         notification_center(user)
 
 def logout_button():
-    if st.sidebar.button("Изход",use_container_width=True): st.session_state.clear(); st.rerun()
+    if st.sidebar.button("Изход",use_container_width=True):
+        token = st.session_state.get("login_token") or st.query_params.get("session")
+        if token:
+            execute("DELETE FROM login_sessions WHERE token_hash=%s", (session_token_hash(token),))
+        st.session_state.clear()
+        st.query_params.clear()
+        st.rerun()
 
 user = current_user()
 
