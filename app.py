@@ -158,7 +158,7 @@ def apply_style():
     bg = image_data(ASSETS["background"])
     st.markdown(f"""<style>
     :root{{--gold:#b48a32;--gold2:#d6b765;--cream:#f8f4ea;--ink:#17140e;--line:rgba(180,138,50,.34)}}
-    .stApp{{background:linear-gradient(rgba(249,246,238,.91),rgba(249,246,238,.94)),url('{bg}');background-size:cover;background-position:center;background-attachment:fixed;color:var(--ink)}}
+    .stApp{{background:linear-gradient(rgba(5, 5, 5, 0.58),rgba(5, 5, 5, 0.72),url('{bg}');background-size:cover;background-position:center;background-attachment:fixed;color:var(--ink)}}
     .block-container{{max-width:1250px;padding-top:1.2rem;padding-bottom:4rem}}
     h1,h2,h3{{color:#17140e!important}} p,label,.stMarkdown{{color:#2b261c}}
     section[data-testid='stSidebar']{{background:rgba(252,249,241,.97);border-right:1px solid var(--line)}}
