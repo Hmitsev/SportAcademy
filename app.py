@@ -133,7 +133,10 @@ def init_db():
             id BIGSERIAL PRIMARY KEY, academy_id BIGINT NOT NULL REFERENCES academies(id) ON DELETE CASCADE,
             team_id BIGINT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
             sender_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            body TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""",
+            body TEXT NOT NULL, image_data BYTEA, image_mime TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""",
+        """ALTER TABLE fan_chat_messages ADD COLUMN IF NOT EXISTS image_data BYTEA""",
+        """ALTER TABLE fan_chat_messages ADD COLUMN IF NOT EXISTS image_mime TEXT""",
         """CREATE INDEX IF NOT EXISTS idx_fan_chat_team ON fan_chat_messages(academy_id,team_id,created_at DESC)""",
         """CREATE TABLE IF NOT EXISTS feedback(
             id BIGSERIAL PRIMARY KEY, academy_id BIGINT NOT NULL REFERENCES academies(id) ON DELETE CASCADE,
@@ -569,28 +572,67 @@ def parent_information():
 
 
 def fan_chat(user, team_id):
+    # Поетапно пазим само последните 5 дни. Изтриването се изпълнява при всяко отваряне/изпращане в чата.
+    execute(
+        "DELETE FROM fan_chat_messages WHERE academy_id=%s AND team_id=%s AND created_at < NOW() - INTERVAL '5 days'",
+        (ACADEMY_ID, team_id),
+    )
+
     st.subheader("🗣️ ФЕН ЧАТ")
-    st.caption("Чатът е достъпен само за родителите с деца в същия набор.")
+    st.caption("Чатът е само за родителите в същия набор. Съобщенията се пазят 5 дни.")
+
+    media_enabled = st.checkbox(
+        "📷 Разреши снимка към това съобщение",
+        value=False,
+        key=f"fan_chat_media_enabled_{team_id}",
+    )
+
     with st.form(f"fan_chat_form_{team_id}", clear_on_submit=True):
         body = st.text_area("Ново съобщение", max_chars=1000)
+        image = None
+        if media_enabled:
+            image = st.file_uploader(
+                "📷 Камера / файл със снимка",
+                type=["jpg", "jpeg", "png", "webp"],
+                accept_multiple_files=False,
+                key=f"fan_chat_image_{team_id}",
+            )
         send = st.form_submit_button("Изпрати в групата", use_container_width=True)
-    if send and body.strip():
-        execute(
-            "INSERT INTO fan_chat_messages(academy_id,team_id,sender_user_id,body) VALUES(%s,%s,%s,%s)",
-            (ACADEMY_ID,team_id,user["id"],body.strip()),
-        )
-        st.rerun()
+
+    if send:
+        image_bytes = image.getvalue() if image else None
+        image_mime = image.type if image else None
+        if not body.strip() and not image_bytes:
+            st.error("Напиши съобщение или добави снимка.")
+        else:
+            # За да не позволяваме прекалено големи снимки в PostgreSQL.
+            if image_bytes and len(image_bytes) > 5 * 1024 * 1024:
+                st.error("Снимката е прекалено голяма. Максимум 5 MB.")
+            else:
+                execute(
+                    """INSERT INTO fan_chat_messages(academy_id,team_id,sender_user_id,body,image_data,image_mime)
+                       VALUES(%s,%s,%s,%s,%s,%s)""",
+                    (ACADEMY_ID, team_id, user["id"], body.strip(), image_bytes, image_mime),
+                )
+                st.rerun()
+
     rows = fetchall(
         """SELECT f.*,u.first_name,u.last_name FROM fan_chat_messages f
            JOIN users u ON u.id=f.sender_user_id
-           WHERE f.academy_id=%s AND f.team_id=%s ORDER BY f.created_at DESC LIMIT 100""",
-        (ACADEMY_ID,team_id),
+           WHERE f.academy_id=%s AND f.team_id=%s
+             AND f.created_at >= NOW() - INTERVAL '5 days'
+           ORDER BY f.created_at DESC LIMIT 100""",
+        (ACADEMY_ID, team_id),
     )
-    if not rows: st.info("Няма съобщения във ФЕН ЧАТ.")
+    if not rows:
+        st.info("Няма съобщения във ФЕН ЧАТ от последните 5 дни.")
     for row in rows:
         with st.container(border=True):
             st.write(f"**{row['first_name']} {row['last_name']}**")
-            st.write(row["body"])
+            if row.get("body"):
+                st.write(row["body"])
+            if row.get("image_data"):
+                st.image(bytes(row["image_data"]), use_container_width=True)
             st.caption(row["created_at"].strftime("%d.%m.%Y %H:%M"))
 
 def register_parent():
