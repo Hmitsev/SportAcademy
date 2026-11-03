@@ -702,6 +702,34 @@ def admin_panel(user):
                     if st.button("Запази промяната", key=f"archive_mv{player['id']}", use_container_width=True):
                         execute("UPDATE players SET team_id=%s WHERE id=%s AND academy_id=%s", (tmap[choice]["id"], player["id"], ACADEMY_ID)); st.rerun()
 
+                    st.markdown("---")
+                    st.markdown("#### 🗑️ Окончателно изтриване")
+                    st.warning("Това действие е необратимо. Ще бъдат изтрити детето и свързаните с него такси, присъствия и връзки с родителски профили.")
+                    delete_confirmation = st.text_input(
+                        'За потвърждение напиши точно ИЗТРИЙ',
+                        key=f"delete_confirm_{player['id']}",
+                        placeholder="ИЗТРИЙ",
+                    )
+                    if st.button(
+                        "🗑️ Изтрий окончателно",
+                        key=f"delete_player_{player['id']}",
+                        use_container_width=True,
+                    ):
+                        if delete_confirmation.strip() != "ИЗТРИЙ":
+                            st.error('Окончателното изтриване не е изпълнено. Напиши точно „ИЗТРИЙ“.')
+                        else:
+                            with db() as conn, conn.cursor() as cur:
+                                cur.execute("SELECT id FROM players WHERE id=%s AND academy_id=%s FOR UPDATE", (player["id"], ACADEMY_ID))
+                                if not cur.fetchone():
+                                    st.error("Детето вече не съществува или не принадлежи към тази академия.")
+                                else:
+                                    cur.execute("DELETE FROM attendance WHERE academy_id=%s AND player_id=%s", (ACADEMY_ID, player["id"]))
+                                    cur.execute("DELETE FROM player_fees WHERE academy_id=%s AND player_id=%s", (ACADEMY_ID, player["id"]))
+                                    cur.execute("DELETE FROM parent_players WHERE academy_id=%s AND player_id=%s", (ACADEMY_ID, player["id"]))
+                                    cur.execute("DELETE FROM players WHERE academy_id=%s AND id=%s", (ACADEMY_ID, player["id"]))
+                            st.success(f"{player['first_name']} {player['last_name']} е изтрит/а окончателно.")
+                            st.rerun()
+
     elif sec == "Треньори и набори":
         coach_account_manager()
         st.divider()
