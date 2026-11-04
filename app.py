@@ -70,6 +70,21 @@ def image_data(path):
     mime = "image/jpeg"
     return f"data:{mime};base64," + base64.b64encode(path.read_bytes()).decode()
 
+def avatar_html(image_bytes=None, mime_type=None, size=74):
+    if image_bytes:
+        mime_type = mime_type or "image/jpeg"
+        encoded = base64.b64encode(bytes(image_bytes)).decode("utf-8")
+        return f"""<div style="width:{size}px;height:{size}px;border-radius:50%;overflow:hidden;border:2px solid rgba(214,183,101,.85);background:#11151c;flex:0 0 {size}px"><img src="data:{mime_type};base64,{encoded}" style="width:100%;height:100%;object-fit:cover"></div>"""
+    return f"""<div style="width:{size}px;height:{size}px;border-radius:50%;border:2px solid rgba(214,183,101,.65);background:linear-gradient(145deg,#11151c,#242a35);color:#9aa3b2;display:flex;align-items:center;justify-content:center;font-size:{int(size*.52)}px;flex:0 0 {size}px">👤</div>"""
+
+def valid_profile_image(uploaded_file):
+    if not uploaded_file: return None, None
+    image_bytes = uploaded_file.getvalue()
+    if len(image_bytes) > 5 * 1024 * 1024:
+        st.error("Снимката е прекалено голяма. Максималният размер е 5 MB.")
+        return None, None
+    return image_bytes, uploaded_file.type
+
 @st.cache_resource(show_spinner=False)
 def init_db():
     statements = [
@@ -220,6 +235,11 @@ def init_db():
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             UNIQUE(player_id,evaluation_year,evaluation_month))""",
         """CREATE INDEX IF NOT EXISTS idx_player_evaluations_period ON player_evaluations(academy_id,player_id,evaluation_year DESC,evaluation_month DESC)""",
+        """ALTER TABLE players ADD COLUMN IF NOT EXISTS profile_image BYTEA""",
+        """ALTER TABLE players ADD COLUMN IF NOT EXISTS profile_image_mime TEXT""",
+        """ALTER TABLE coaches ADD COLUMN IF NOT EXISTS profile_image BYTEA""",
+        """ALTER TABLE coaches ADD COLUMN IF NOT EXISTS profile_image_mime TEXT""",
+        """ALTER TABLE academies ADD COLUMN IF NOT EXISTS parent_help_video_url TEXT""",
         """CREATE INDEX IF NOT EXISTS idx_fees_player ON player_fees(academy_id,player_id,fee_year,fee_month)""",
     ]
     with db() as conn, conn.cursor() as cur:
@@ -255,8 +275,8 @@ def apply_style():
             --text: #ffffff;
             --muted: #ddd4c2;
             --line: rgba(214, 183, 101, 0.48);
-            --glass: rgba(8, 8, 8, 0.54);
-            --glass-strong: rgba(5, 5, 5, 0.72);
+            --glass: rgba(8, 8, 8, 0.70);
+            --glass-strong: rgba(5, 5, 5, 0.84);
         }}
 
         /* ОСНОВЕН ФОН */
@@ -266,8 +286,8 @@ def apply_style():
         .stApp {{
             background-image:
                 linear-gradient(
-                    rgba(0, 0, 0, 0.48),
-                    rgba(0, 0, 0, 0.68)
+                    rgba(0, 0, 0, 0.68),
+                    rgba(0, 0, 0, 0.82)
                 ),
                 url("{bg}") !important;
 
@@ -685,9 +705,12 @@ def hero():
         st.markdown('</div>', unsafe_allow_html=True)
 
 def public_home():
-    # Стартовата страница показва само идентичността на академията.
-    # Информацията от администратора е достъпна след вход в родителския профил.
     hero()
+    video_url = academy().get("parent_help_video_url")
+    with st.expander("▶️ Как се използва приложението от родители", expanded=False):
+        st.caption("Кратко видео за регистрация, вход и използване на родителския профил.")
+        if video_url: st.video(video_url)
+        else: st.info("Видео инструкцията все още не е добавена от администратора.")
 
 
 def parent_information(user=None):
@@ -782,7 +805,10 @@ def render_poll(poll,user,child=None):
     pid=child["id"] if child else None
     old=fetchone("SELECT answer FROM poll_responses WHERE poll_id=%s AND user_id=%s AND player_id IS NOT DISTINCT FROM %s",(poll["id"],user["id"],pid))
     with st.container(border=True):
-        st.write(f"**📊 {poll['title']}**"); st.write(poll["question"])
+        if poll.get("poll_type") == "match_attendance": st.write("**📊 Потвърждение за участие**")
+        else:
+            st.write(f"**📊 {poll['title']}**")
+            if poll.get("question"): st.write(poll["question"])
         vals=["yes","no","maybe"]
         ans=st.radio("Избор",vals,index=vals.index(old["answer"]) if old and old["answer"] in vals else 0,format_func=lambda x:{"yes":"Да","no":"Не","maybe":"Не съм сигурен/а"}[x],horizontal=True,key=f"poll_{poll['id']}_{pid or 0}")
         if st.button("Запази отговора",key=f"poll_save_{poll['id']}_{pid or 0}",use_container_width=True):
@@ -801,10 +827,16 @@ def payment_excel(rows):
         for c in ws.columns:ws.column_dimensions[c[0].column_letter].width=min(max(len(str(x.value or "")) for x in c)+2,32)
     return b.getvalue()
 
-def payment_panel(user,team_ids=None):
+def payment_panel(user,team_ids=None,fixed_team_id=None):
     teams=fetchall("SELECT * FROM teams WHERE academy_id=%s AND active ORDER BY birth_year",(ACADEMY_ID,)); teams=[t for t in teams if team_ids is None or t["id"] in team_ids]
     if not teams:st.info("Няма набори.");return
-    m={t["name"]:t for t in teams}; team=m[st.selectbox("Набор",list(m),key=f"fee_team_{user['id']}")]
+    m={t["name"]:t for t in teams}
+    if fixed_team_id is not None:
+        team=next((item for item in teams if item["id"]==fixed_team_id),None)
+        if not team: st.warning("Избраният набор не е достъпен."); return
+        st.caption(f"Набор: {team['name']}")
+    else:
+        team=m[st.selectbox("Набор",list(m),key=f"fee_team_{user['id']}")]
     for r in payment_rows(team["id"]):
         icon="🟢" if r["status"]=="paid" else "🔴"
         with st.expander(f"{icon} {r['first_name']} {r['last_name']} · {r['fee_month']:02d}.{r['fee_year']} · {r['final_amount']:.2f} EUR"):
@@ -960,7 +992,7 @@ def parent_nav():
                     st.session_state.parent_page=page; st.rerun()
 
 def parent_players(user):
-    return fetchall("""SELECT p.*,t.name team_name,c.display_name coach_name FROM parent_players pp
+    return fetchall("""SELECT p.*,t.name team_name,c.display_name coach_name,c.profile_image coach_image,c.profile_image_mime coach_image_mime FROM parent_players pp
         JOIN players p ON p.id=pp.player_id LEFT JOIN teams t ON t.id=p.team_id LEFT JOIN coaches c ON c.id=t.coach_id
         WHERE pp.academy_id=%s AND pp.parent_user_id=%s AND p.active ORDER BY p.first_name""",(ACADEMY_ID,user["id"]))
 
@@ -1008,6 +1040,22 @@ def render_parent_player_development(user,child):
     st.divider();st.subheader("📊 Развитие на футболиста")
     if not rows:st.info("Все още няма публикувана месечна оценка от треньора.");return
     labels=[("⚽ Техника","technique"),("🧠 Тактика","tactics"),("🏃 Физическа подготовка","physical"),("🤝 Работа в екип","teamwork"),("💪 Дисциплина","discipline"),("⭐ Старание","effort")]
+    available_years=sorted({int(row["evaluation_year"]) for row in rows},reverse=True)
+    period_options=["Всички оценки"]+[f"{year} година" for year in available_years]
+    selected_period=st.selectbox("Период за обобщената статистика",period_options,key=f"development_period_{child['id']}")
+    period_rows=rows if selected_period=="Всички оценки" else [row for row in rows if int(row["evaluation_year"])==int(selected_period.split()[0])]
+    period_label="целия наличен период" if selected_period=="Всички оценки" else selected_period
+    period_averages={field:sum(float(row[field]) for row in period_rows)/len(period_rows) for _,field in labels}
+    period_total=sum(period_averages.values())/len(period_averages)
+    st.markdown(f"### 📈 Обобщено развитие за {period_label}")
+    metric_cols=st.columns(3)
+    for index,(label,field) in enumerate(labels): metric_cols[index%3].metric(label,f"{period_averages[field]:.1f} / 5")
+    st.progress(min(max(period_total/5,0.0),1.0)); st.markdown(f"### Общо за периода: {period_total:.1f} / 5"); st.write(f"**{evaluation_status(period_total)}**")
+    trend_rows=sorted(period_rows,key=lambda item:(item["evaluation_year"],item["evaluation_month"]))
+    if len(trend_rows)>1:
+        trend_data=pd.DataFrame({"Период":[f"{i['evaluation_month']:02d}.{i['evaluation_year']}" for i in trend_rows],"Общо развитие":[evaluation_average(i) for i in trend_rows]})
+        st.line_chart(trend_data.set_index("Период"),height=280)
+    st.divider()
     latest=rows[0];score=evaluation_average(latest)
     with st.container(border=True):
         st.markdown(f"### Последна оценка: {latest['evaluation_month']:02d}.{latest['evaluation_year']}")
@@ -1065,9 +1113,10 @@ def parent_panel(user):
             "SELECT * FROM public_posts WHERE academy_id=%s AND published ORDER BY created_at DESC LIMIT 1",
             (ACADEMY_ID,),
         )
-        c1,c2,c3=st.columns(3)
+        c1,c2,c3=st.columns([1,1.35,1])
         c1.metric("Актуална информация", "1" if latest_info else "0")
-        c2.metric("Набор",child.get("team_name") or "—")
+        with c2:
+            st.markdown(f"""<div style="min-height:140px;padding:14px;border-radius:18px;background:rgba(8,8,8,.72);border:1px solid rgba(214,183,101,.48);display:flex;align-items:center;justify-content:center;gap:14px">{avatar_html(child.get('coach_image'),child.get('coach_image_mime'),78)}<div><div style="font-size:.8rem;color:#c8c1b5">Треньор</div><div style="font-size:1.02rem;font-weight:800">{child.get('coach_name') or 'Очаква свързване'}</div><div style="font-size:.82rem;color:#c8c1b5;margin-top:4px">{child.get('team_name') or 'Без набор'}</div></div></div>""",unsafe_allow_html=True)
         c3.metric("Такса",f"{academy()['default_fee']:.2f} EUR")
         if latest_info:
             with st.container(border=True):
@@ -1221,6 +1270,13 @@ def coach_account_manager():
     st.caption("Всеки треньор използва собствен имейл и парола. Един треньор може да води повече от един набор.")
     for coach in coaches:
         with st.expander(f"{coach['display_name']} · {coach.get('email') or 'без достъп'}"):
+            ci1,ci2=st.columns([1,5])
+            with ci1: st.markdown(avatar_html(coach.get("profile_image"),coach.get("profile_image_mime"),82),unsafe_allow_html=True)
+            with ci2:
+                coach_image=st.file_uploader("Снимка на треньора",type=["jpg","jpeg","png","webp"],key=f"coach_image_{coach['id']}")
+                if st.button("Запази снимката",key=f"save_coach_image_{coach['id']}"):
+                    ib,im=valid_profile_image(coach_image)
+                    if ib: execute("UPDATE coaches SET profile_image=%s,profile_image_mime=%s WHERE id=%s AND academy_id=%s",(ib,im,coach["id"],ACADEMY_ID)); st.rerun()
             name = st.text_input("Име на треньора", coach["display_name"], key=f"coach_name_{coach['id']}")
             email = st.text_input("Имейл за вход", coach.get("email") or "", key=f"coach_email_{coach['id']}").strip().lower()
             password = st.text_input("Нова / начална парола", type="password", key=f"coach_pw_{coach['id']}")
@@ -1298,13 +1354,23 @@ def admin_panel(user):
                     if st.button("Потвърди и свържи", key=f"pending_mv{player['id']}", use_container_width=True):
                         execute("UPDATE players SET team_id=%s,approval_status='approved' WHERE id=%s AND academy_id=%s", (tmap[choice]["id"], player["id"], ACADEMY_ID)); st.rerun()
         with archive_tab:
-            players = fetchall("""SELECT p.*,t.name team_name,c.display_name coach_name FROM players p
-                                LEFT JOIN teams t ON t.id=p.team_id LEFT JOIN coaches c ON c.id=t.coach_id
-                                WHERE p.academy_id=%s AND p.active AND p.approval_status='approved'
-                                ORDER BY t.birth_year,p.first_name""", (ACADEMY_ID,))
+            archive_options={"Всички набори":None,**{t["name"]:t["id"] for t in teams}}
+            archive_label=st.selectbox("Покажи деца от набор",list(archive_options),key="admin_archive_team_filter")
+            archive_team_id=archive_options[archive_label]
+            if archive_team_id is None:
+                players=fetchall("""SELECT p.*,t.name team_name,c.display_name coach_name FROM players p LEFT JOIN teams t ON t.id=p.team_id LEFT JOIN coaches c ON c.id=t.coach_id WHERE p.academy_id=%s AND p.active AND p.approval_status='approved' ORDER BY t.birth_year,p.first_name,p.last_name""",(ACADEMY_ID,))
+            else:
+                players=fetchall("""SELECT p.*,t.name team_name,c.display_name coach_name FROM players p LEFT JOIN teams t ON t.id=p.team_id LEFT JOIN coaches c ON c.id=t.coach_id WHERE p.academy_id=%s AND p.team_id=%s AND p.active AND p.approval_status='approved' ORDER BY p.first_name,p.last_name""",(ACADEMY_ID,archive_team_id))
             if not players: st.info("Няма потвърдени деца.")
             for player in players:
                 with st.expander(f"🟢 {player['first_name']} {player['last_name']} · {player.get('team_name') or 'Без група'} · {player.get('coach_name') or 'Без треньор'}"):
+                    pi1,pi2=st.columns([1,5])
+                    with pi1: st.markdown(avatar_html(player.get("profile_image"),player.get("profile_image_mime"),82),unsafe_allow_html=True)
+                    with pi2:
+                        player_image=st.file_uploader("Профилна снимка",type=["jpg","jpeg","png","webp"],key=f"player_image_{player['id']}")
+                        if st.button("Запази снимката",key=f"save_player_image_{player['id']}"):
+                            ib,im=valid_profile_image(player_image)
+                            if ib: execute("UPDATE players SET profile_image=%s,profile_image_mime=%s WHERE id=%s AND academy_id=%s",(ib,im,player["id"],ACADEMY_ID)); st.rerun()
                     choice = st.selectbox("Премести в друга група / при друг треньор", list(tmap), key=f"archive_tm{player['id']}")
                     if st.button("Запази промяната", key=f"archive_mv{player['id']}", use_container_width=True):
                         execute("UPDATE players SET team_id=%s WHERE id=%s AND academy_id=%s", (tmap[choice]["id"], player["id"], ACADEMY_ID)); st.rerun()
@@ -1332,6 +1398,9 @@ def admin_panel(user):
                                 else:
                                     cur.execute("DELETE FROM attendance WHERE academy_id=%s AND player_id=%s", (ACADEMY_ID, player["id"]))
                                     cur.execute("DELETE FROM player_fees WHERE academy_id=%s AND player_id=%s", (ACADEMY_ID, player["id"]))
+                                    cur.execute("DELETE FROM player_evaluations WHERE academy_id=%s AND player_id=%s", (ACADEMY_ID, player["id"]))
+                                    cur.execute("DELETE FROM match_squads WHERE academy_id=%s AND player_id=%s", (ACADEMY_ID, player["id"]))
+                                    cur.execute("DELETE FROM poll_responses WHERE academy_id=%s AND player_id=%s", (ACADEMY_ID, player["id"]))
                                     cur.execute("DELETE FROM parent_players WHERE academy_id=%s AND player_id=%s", (ACADEMY_ID, player["id"]))
                                     cur.execute("DELETE FROM players WHERE academy_id=%s AND id=%s", (ACADEMY_ID, player["id"]))
                             st.success(f"{player['first_name']} {player['last_name']} е изтрит/а окончателно.")
@@ -1528,6 +1597,14 @@ def admin_panel(user):
             expense_panel(user)
 
     elif sec == "Информация":
+        st.subheader("🎬 Видео инструкция за родители")
+        current_help_video=academy().get("parent_help_video_url") or ""
+        help_video_url=st.text_input("Линк към видео инструкция",value=current_help_video,key="parent_help_video_url")
+        vh1,vh2=st.columns(2)
+        if vh1.button("Запази видео инструкцията",use_container_width=True): execute("UPDATE academies SET parent_help_video_url=%s WHERE id=%s",(help_video_url.strip() or None,ACADEMY_ID)); st.rerun()
+        if vh2.button("Премахни видеото",use_container_width=True): execute("UPDATE academies SET parent_help_video_url=NULL WHERE id=%s",(ACADEMY_ID,)); st.rerun()
+        if current_help_video: st.video(current_help_video)
+        st.divider()
         with st.form("post_form"):
             title=st.text_input("Заглавие"); body=st.text_area("Текст"); typ=st.radio("Медия",["image","video"],format_func=lambda x:"Снимка" if x=="image" else "Видео линк",horizontal=True); url=st.text_input("URL за видео/снимка"); upload=st.file_uploader("Или качи снимка",type=["jpg","jpeg","png","webp"]); add_poll=st.checkbox("📊 Добави глобална анкета"); poll_question=st.text_input("Въпрос на анкетата") if add_poll else ""; send=st.form_submit_button("Добави в информационния архив",use_container_width=True)
         if send and title.strip():
@@ -1570,18 +1647,17 @@ def coach_panel(user):
         st.info("Няма възложени набори към този треньор.")
         return
     st.sidebar.caption(coach["display_name"])
-    sections = ["Табло", "Моите деца", "Тренировки и мачове", "Група за мача", "Присъствие", "Такси", "Съобщения", "Обратна връзка"]
+    sections = ["Табло", "Тренировки и мачове", "Група за мача", "Присъствие", "Такси", "Съобщения", "Обратна връзка"]
     sec = st.sidebar.radio("Треньорско меню", sections)
     tmap = {t["name"]: t for t in teams}
     team_name = st.selectbox("Избран набор", list(tmap), key="coach_selected_team")
     team = tmap[team_name]
 
     if sec == "Табло":
-        children = fetchone("SELECT COUNT(*) c FROM players WHERE academy_id=%s AND team_id=%s AND approval_status='approved' AND active", (ACADEMY_ID, team["id"]))["c"]
-        events = fetchone("SELECT COUNT(*) c FROM events WHERE academy_id=%s AND team_id=%s AND starts_at>=NOW()", (ACADEMY_ID, team["id"]))["c"]
-        c1,c2 = st.columns(2); c1.metric("Деца в групата", children); c2.metric("Предстоящи събития", events)
-    elif sec == "Моите деца":
-        players = fetchall("SELECT * FROM players WHERE academy_id=%s AND team_id=%s AND approval_status='approved' AND active ORDER BY first_name,last_name", (ACADEMY_ID, team["id"]))
+        players=fetchall("SELECT * FROM players WHERE academy_id=%s AND team_id=%s AND approval_status='approved' AND active ORDER BY first_name,last_name",(ACADEMY_ID,team["id"]))
+        events=fetchone("SELECT COUNT(*) c FROM events WHERE academy_id=%s AND team_id=%s AND starts_at>=NOW()",(ACADEMY_ID,team["id"]))["c"]
+        c1,c2=st.columns(2); c1.metric("Деца в групата",len(players)); c2.metric("Предстоящи събития",events)
+        st.divider(); st.subheader("👥 Моите деца")
         for player in players: st.write(f"🟢 **{player['first_name']} {player['last_name']}**")
         if not players: st.info("Няма потвърдени деца в този набор.")
     elif sec == "Тренировки и мачове":
@@ -1610,40 +1686,31 @@ def coach_panel(user):
                         (ACADEMY_ID, match["id"]),
                     )
                 }
-                st.caption("Използването на този списък е по желание на треньора и според договорката с родителите.")
+                st.caption("Маркирай само футболистите, които са в групата за избрания мач.")
                 with st.form(f"match_squad_{match['id']}"):
-                    choices = {}
-                    values = ["in_group", "not_in_group"]
+                    choices={}
+                    st.markdown("#### Футболисти")
                     for player in players:
-                        current = existing.get(player["id"], "not_in_group")
-                        choices[player["id"]] = st.selectbox(
-                            f"{player['first_name']} {player['last_name']}",
-                            values,
-                            index=values.index(current),
-                            format_func=lambda x: "В групата" if x == "in_group" else "Не е в групата",
-                            key=f"squad_{match['id']}_{player['id']}",
-                        )
-                    create_match_poll=st.checkbox("📊 Анкета за присъствие на мача",key=f"match_poll_{match['id']}")
-                    publish_squad = st.form_submit_button("Изпрати групата към родителите", use_container_width=True)
+                        current=existing.get(player["id"],"not_in_group")=="in_group"
+                        name_col,check_col=st.columns([8,1])
+                        name_col.write(f"**{player['first_name']} {player['last_name']}**")
+                        choices[player["id"]]=check_col.checkbox("В групата",value=current,key=f"squad_check_{match['id']}_{player['id']}",label_visibility="collapsed")
+                    existing_poll=fetchone("SELECT id FROM polls WHERE academy_id=%s AND event_id=%s AND poll_type='match_attendance' AND active ORDER BY created_at DESC LIMIT 1",(ACADEMY_ID,match["id"]))
+                    create_match_poll=st.checkbox("📊 Изпрати анкета за присъствие на избраните футболисти",value=bool(existing_poll),key=f"match_poll_{match['id']}")
+                    publish_squad=st.form_submit_button("Изпрати групата към родителите",use_container_width=True)
                 if publish_squad:
                     with db() as conn, conn.cursor() as cur:
-                        cur.execute(
-                            "DELETE FROM match_squads WHERE academy_id=%s AND event_id=%s",
-                            (ACADEMY_ID, match["id"]),
-                        )
-                        for player_id, squad_status in choices.items():
-                            cur.execute(
-                                """INSERT INTO match_squads(academy_id,event_id,player_id,squad_status,selected_by)
-                                   VALUES(%s,%s,%s,%s,%s)""",
-                                (ACADEMY_ID, match["id"], player_id, squad_status, user["id"]),
-                            )
+                        cur.execute("DELETE FROM match_squads WHERE academy_id=%s AND event_id=%s",(ACADEMY_ID,match["id"]))
+                        for player_id,is_selected in choices.items():
+                            cur.execute("INSERT INTO match_squads(academy_id,event_id,player_id,squad_status,selected_by) VALUES(%s,%s,%s,%s,%s)",(ACADEMY_ID,match["id"],player_id,"in_group" if is_selected else "not_in_group",user["id"]))
                     if create_match_poll:
-                        execute("UPDATE polls SET active=FALSE WHERE academy_id=%s AND event_id=%s",(ACADEMY_ID,match["id"]))
-                        execute("INSERT INTO polls(academy_id,poll_type,title,question,team_id,event_id,created_by) VALUES(%s,'match_attendance',%s,%s,%s,%s,%s)",(ACADEMY_ID,"Присъствие на мача",f"Ще присъства ли детето на {match_label}?",team["id"],match["id"],user["id"]))
-                    notify_team_parents(team["id"], "match_squad", "Публикувана е група за мача", match_label)
-                    st.success("Групата за мача е изпратена към родителите.")
-                    st.rerun()
-
+                        old_poll=fetchone("SELECT id FROM polls WHERE academy_id=%s AND event_id=%s AND poll_type='match_attendance' ORDER BY created_at DESC LIMIT 1",(ACADEMY_ID,match["id"]))
+                        question=f"Ще присъства ли детето на мача на {match['starts_at']:%d.%m.%Y от %H:%M}?"
+                        if old_poll: execute("UPDATE polls SET active=TRUE,title=%s,question=%s,team_id=%s WHERE id=%s AND academy_id=%s",("Присъствие на мача",question,team["id"],old_poll["id"],ACADEMY_ID))
+                        else: execute("INSERT INTO polls(academy_id,poll_type,title,question,team_id,event_id,created_by) VALUES(%s,'match_attendance',%s,%s,%s,%s,%s)",(ACADEMY_ID,"Присъствие на мача",question,team["id"],match["id"],user["id"]))
+                    else: execute("UPDATE polls SET active=FALSE WHERE academy_id=%s AND event_id=%s AND poll_type='match_attendance'",(ACADEMY_ID,match["id"]))
+                    notify_team_parents(team["id"],"match_squad","Публикувана е група за мача",match_label)
+                    st.success("Групата за мача е изпратена към родителите."); st.rerun()
         else:
             coach_player_statistics(user,team)
     elif sec == "Присъствие":
@@ -1665,7 +1732,7 @@ def coach_panel(user):
                             (ACADEMY_ID,event["id"],player_id,status,user["id"]))
                 st.success("Присъствието е запазено.")
     elif sec == "Такси":
-        payment_panel(user,[t["id"] for t in teams])
+        payment_panel(user,[t["id"] for t in teams],fixed_team_id=team["id"])
     elif sec == "Съобщения":
         with st.form("coach_message_form"):
             title = st.text_input("Заглавие"); body = st.text_area("Съобщение към родителите"); send = st.form_submit_button("Изпрати към групата", use_container_width=True)
