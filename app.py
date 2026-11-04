@@ -1352,10 +1352,19 @@ def results_statistics_panel(team):
         st.success("Линкът към класирането е запазен."); st.rerun()
     if standings_url.strip(): open_col.link_button("🔗 Отвори класирането",standings_url.strip(),use_container_width=True)
     else: open_col.info("Няма добавен линк.")
-    years=fetchall("""SELECT DISTINCT EXTRACT(YEAR FROM e.starts_at)::int year FROM match_reports mr JOIN events e ON e.id=mr.event_id WHERE mr.academy_id=%s AND mr.team_id=%s AND mr.confirmed ORDER BY year DESC""",(ACADEMY_ID,team["id"]))
+    years = fetchall(
+        """SELECT DISTINCT date_part('year', e.starts_at)::int AS year
+           FROM match_reports mr
+           JOIN events e ON e.id=mr.event_id
+           WHERE mr.academy_id=%s
+             AND mr.team_id=%s
+             AND mr.confirmed
+           ORDER BY year DESC""",
+        (ACADEMY_ID, team["id"]),
+    )
     if not years: st.info("Няма потвърдени резултати."); return
     selected_year=st.selectbox("Архив по година",[r["year"] for r in years],key=f"results_year_{team['id']}")
-    rows=fetchall("""SELECT mr.*,e.title,e.starts_at FROM match_reports mr JOIN events e ON e.id=mr.event_id WHERE mr.academy_id=%s AND mr.team_id=%s AND mr.confirmed AND EXTRACT(YEAR FROM e.starts_at)=%s ORDER BY e.starts_at DESC""",(ACADEMY_ID,team["id"],selected_year))
+    rows=fetchall("""SELECT mr.*,e.title,e.starts_at FROM match_reports mr JOIN events e ON e.id=mr.event_id WHERE mr.academy_id=%s AND mr.team_id=%s AND mr.confirmed AND date_part('year', e.starts_at)::int=%s ORDER BY e.starts_at DESC""",(ACADEMY_ID,team["id"],selected_year))
     wins=sum(1 for r in rows if r["home_score"]>r["away_score"]);draws=sum(1 for r in rows if r["home_score"]==r["away_score"]);losses=len(rows)-wins-draws
     for col,label,value in zip(st.columns(4),["Мачове","Победи","Равни","Загуби"],[len(rows),wins,draws,losses]): col.metric(label,value)
     result_tab,scorer_tab=st.tabs(["📅 Архив на мачовете","⚽ Голмайстори"])
@@ -1500,16 +1509,21 @@ def parent_panel(user):
                 st.link_button("🔗 Отвори актуалното класиране",team_info["standings_url"],use_container_width=True)
             else:
                 st.info("Все още няма добавен линк към класирането.")
-            result_years=fetchall(
-                """SELECT DISTINCT EXTRACT(YEAR FROM e.starts_at)::int year FROM match_reports mr
-                   JOIN events e ON e.id=mr.event_id WHERE mr.academy_id=%s AND mr.team_id=%s AND mr.confirmed ORDER BY year DESC""",
-                (ACADEMY_ID,child.get("team_id")),
+            result_years = fetchall(
+                """SELECT DISTINCT date_part('year', e.starts_at)::int AS year
+                   FROM match_reports mr
+                   JOIN events e ON e.id=mr.event_id
+                   WHERE mr.academy_id=%s
+                     AND mr.team_id=%s
+                     AND mr.confirmed
+                   ORDER BY year DESC""",
+                (ACADEMY_ID, child.get("team_id")),
             ) if child.get("team_id") else []
             selected_result_year=st.selectbox("Година",[r["year"] for r in result_years],key=f"parent_results_year_{child['id']}") if result_years else None
             results=fetchall(
                 """SELECT mr.*,e.title,e.starts_at,e.location FROM match_reports mr
                    JOIN events e ON e.id=mr.event_id
-                   WHERE mr.academy_id=%s AND mr.team_id=%s AND mr.confirmed AND EXTRACT(YEAR FROM e.starts_at)=%s
+                   WHERE mr.academy_id=%s AND mr.team_id=%s AND mr.confirmed AND date_part('year', e.starts_at)::int=%s
                    ORDER BY e.starts_at DESC""",
                 (ACADEMY_ID,child.get("team_id"),selected_result_year),
             ) if child.get("team_id") and selected_result_year else []
