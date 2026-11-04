@@ -1633,9 +1633,9 @@ def multi_date_event_form(form_key, teams, user_id, fixed_team_id=None):
                        format_func=lambda x: "🏃 Тренировка" if x == "training" else "⚽ Мач",
                        horizontal=True, key=f"{form_key}_type")
         if typ == "training":
-            st.success("✅ В момента добавяш ТРЕНИРОВКА")
+            st.success("🏃 ИЗБРАНО: ТРЕНИРОВКА")
         else:
-            st.info("✅ В момента добавяш МАЧ")
+            st.warning("⚽ ИЗБРАНО: МАЧ")
         if fixed_team_id is None:
             team_name = st.selectbox("Набор", list(tmap), key=f"{form_key}_team")
             team_id = tmap[team_name]
