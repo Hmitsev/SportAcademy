@@ -202,6 +202,24 @@ def init_db():
             last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""",
         """CREATE INDEX IF NOT EXISTS idx_login_sessions_token ON login_sessions(token_hash,last_seen)""",
+        """CREATE TABLE IF NOT EXISTS player_evaluations(
+            id BIGSERIAL PRIMARY KEY,
+            academy_id BIGINT NOT NULL REFERENCES academies(id) ON DELETE CASCADE,
+            player_id BIGINT NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+            team_id BIGINT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+            coach_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+            evaluation_year INTEGER NOT NULL CHECK(evaluation_year BETWEEN 2020 AND 2100),
+            evaluation_month INTEGER NOT NULL CHECK(evaluation_month BETWEEN 1 AND 12),
+            technique INTEGER NOT NULL CHECK(technique BETWEEN 1 AND 5),
+            tactics INTEGER NOT NULL CHECK(tactics BETWEEN 1 AND 5),
+            physical INTEGER NOT NULL CHECK(physical BETWEEN 1 AND 5),
+            teamwork INTEGER NOT NULL CHECK(teamwork BETWEEN 1 AND 5),
+            discipline INTEGER NOT NULL CHECK(discipline BETWEEN 1 AND 5),
+            effort INTEGER NOT NULL CHECK(effort BETWEEN 1 AND 5),
+            coach_note TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            UNIQUE(player_id,evaluation_year,evaluation_month))""",
+        """CREATE INDEX IF NOT EXISTS idx_player_evaluations_period ON player_evaluations(academy_id,player_id,evaluation_year DESC,evaluation_month DESC)""",
         """CREATE INDEX IF NOT EXISTS idx_fees_player ON player_fees(academy_id,player_id,fee_year,fee_month)""",
     ]
     with db() as conn, conn.cursor() as cur:
@@ -946,6 +964,90 @@ def parent_players(user):
         JOIN players p ON p.id=pp.player_id LEFT JOIN teams t ON t.id=p.team_id LEFT JOIN coaches c ON c.id=t.coach_id
         WHERE pp.academy_id=%s AND pp.parent_user_id=%s AND p.active ORDER BY p.first_name""",(ACADEMY_ID,user["id"]))
 
+def evaluation_average(row):
+    return sum(int(row[x]) for x in ("technique","tactics","physical","teamwork","discipline","effort"))/6
+
+def evaluation_status(score):
+    if score >= 4.50: return "🟢 Отлично развитие"
+    if score >= 3.75: return "🟢 Много добро развитие"
+    if score >= 3.00: return "🔵 Добро развитие"
+    if score >= 2.00: return "🟠 Нужда от развитие"
+    return "🔴 Изисква допълнително внимание"
+
+def star_rating(value):
+    value=max(1,min(5,int(value))); return "★"*value+"☆"*(5-value)
+
+def month_bounds(year,month):
+    start=datetime(int(year),int(month),1)
+    end=datetime(int(year)+1,1,1) if int(month)==12 else datetime(int(year),int(month)+1,1)
+    return start,end
+
+def player_attendance_stats(player_id,team_id,year,month):
+    if not team_id:return {"trainings":0,"present":0,"absent":0,"excused":0,"percent":None}
+    start,end=month_bounds(year,month)
+    r=fetchone("""SELECT COUNT(DISTINCT e.id) trainings,
+        COUNT(DISTINCT e.id) FILTER(WHERE a.status='present') present,
+        COUNT(DISTINCT e.id) FILTER(WHERE a.status='absent') absent,
+        COUNT(DISTINCT e.id) FILTER(WHERE a.status='excused') excused
+        FROM events e LEFT JOIN attendance a ON a.event_id=e.id AND a.player_id=%s AND a.academy_id=%s
+        WHERE e.academy_id=%s AND e.team_id=%s AND e.event_type='training'
+        AND e.starts_at >= %s AND e.starts_at < %s AND e.status <> 'cancelled'""",
+        (player_id,ACADEMY_ID,ACADEMY_ID,team_id,start,end)) or {}
+    total=int(r.get("trainings") or 0);present=int(r.get("present") or 0)
+    return {"trainings":total,"present":present,"absent":int(r.get("absent") or 0),"excused":int(r.get("excused") or 0),"percent":present/total*100 if total else None}
+
+def render_attendance_stats(player_id,team_id,year,month):
+    a=player_attendance_stats(player_id,team_id,year,month);st.markdown("#### 📅 Автоматична посещаемост")
+    if not a["trainings"]:st.info("За избрания месец все още няма достатъчно данни за проведени тренировки.");return
+    c=st.columns(5);c[0].metric("Тренировки",a["trainings"]);c[1].metric("Присъствия",a["present"]);c[2].metric("Отсъствия",a["absent"]);c[3].metric("Извинени",a["excused"]);c[4].metric("Посещаемост",f"{a['percent']:.1f}%")
+
+def render_parent_player_development(user,child):
+    rows=fetchall("""SELECT pe.* FROM player_evaluations pe JOIN parent_players pp ON pp.player_id=pe.player_id
+        WHERE pe.academy_id=%s AND pp.academy_id=%s AND pp.parent_user_id=%s AND pe.player_id=%s
+        ORDER BY pe.evaluation_year DESC,pe.evaluation_month DESC""",(ACADEMY_ID,ACADEMY_ID,user["id"],child["id"]))
+    st.divider();st.subheader("📊 Развитие на футболиста")
+    if not rows:st.info("Все още няма публикувана месечна оценка от треньора.");return
+    labels=[("⚽ Техника","technique"),("🧠 Тактика","tactics"),("🏃 Физическа подготовка","physical"),("🤝 Работа в екип","teamwork"),("💪 Дисциплина","discipline"),("⭐ Старание","effort")]
+    latest=rows[0];score=evaluation_average(latest)
+    with st.container(border=True):
+        st.markdown(f"### Последна оценка: {latest['evaluation_month']:02d}.{latest['evaluation_year']}")
+        for label,field in labels:st.write(f"**{label}:** {star_rating(latest[field])}")
+        st.markdown(f"### Общо развитие: {score:.1f} / 5");st.write(f"**{evaluation_status(score)}**")
+        st.caption("Статусът показва развитието за периода, а не определя детето като добър или слаб футболист.")
+        if latest.get("coach_note"):st.markdown("#### 📝 Бележка от треньора");st.write(latest["coach_note"])
+        render_attendance_stats(child["id"],child.get("team_id"),latest["evaluation_year"],latest["evaluation_month"])
+    st.markdown("### История на развитието")
+    for item in reversed(rows):
+        score=evaluation_average(item)
+        with st.expander(f"{item['evaluation_month']:02d}.{item['evaluation_year']} → {score:.1f}/5"):
+            for label,field in labels:st.write(f"**{label}:** {star_rating(item[field])}")
+            st.write(f"**{evaluation_status(score)}**")
+            if item.get("coach_note"):st.write(f"📝 {item['coach_note']}")
+            render_attendance_stats(child["id"],child.get("team_id"),item["evaluation_year"],item["evaluation_month"])
+
+def coach_player_statistics(user,team):
+    players=fetchall("""SELECT p.* FROM players p JOIN teams t ON t.id=p.team_id JOIN coaches c ON c.id=t.coach_id
+        WHERE p.academy_id=%s AND p.team_id=%s AND p.approval_status='approved' AND p.active
+        AND c.academy_id=%s AND c.user_id=%s AND c.active ORDER BY p.first_name,p.last_name""",(ACADEMY_ID,team["id"],ACADEMY_ID,user["id"]))
+    if not players:st.info("Няма потвърдени футболисти в този набор.");return
+    pmap={f"{x['first_name']} {x['last_name']}":x for x in players};label=st.selectbox("Футболист",list(pmap),key=f"eval_player_{team['id']}");player=pmap[label];now=date.today()
+    c1,c2=st.columns(2);month=c1.selectbox("Месец",range(1,13),index=now.month-1,key=f"eval_month_{team['id']}_{player['id']}");year=int(c2.number_input("Година",2020,2100,now.year,key=f"eval_year_{team['id']}_{player['id']}"))
+    old=fetchone("""SELECT pe.* FROM player_evaluations pe JOIN teams t ON t.id=pe.team_id JOIN coaches c ON c.id=t.coach_id
+        WHERE pe.academy_id=%s AND pe.player_id=%s AND pe.team_id=%s AND pe.evaluation_year=%s AND pe.evaluation_month=%s AND c.user_id=%s AND c.active""",(ACADEMY_ID,player["id"],team["id"],year,month,user["id"]))
+    if old:st.info("За този месец има запазена оценка. Промените ще обновят съществуващия запис.")
+    criteria=[("⚽ Техника","technique"),("🧠 Тактика","tactics"),("🏃 Физическа подготовка","physical"),("🤝 Работа в екип","teamwork"),("💪 Дисциплина","discipline"),("⭐ Старание / отношение към тренировките","effort")];vals={}
+    for label,field in criteria:vals[field]=st.select_slider(label,options=[1,2,3,4,5],value=int(old[field]) if old else 3,format_func=star_rating,key=f"eval_{field}_{team['id']}_{player['id']}_{year}_{month}")
+    note=st.text_area("📝 Бележка от треньора",value=(old.get("coach_note") or "") if old else "",key=f"eval_note_{team['id']}_{player['id']}_{year}_{month}")
+    score=sum(vals.values())/6;st.markdown(f"### Общо развитие: {score:.1f} / 5");st.write(f"**{evaluation_status(score)}**");st.caption("Статусът показва развитието за периода, а не определя детето като добър или слаб футболист.");render_attendance_stats(player["id"],team["id"],year,month)
+    if st.button("💾 Запази месечната оценка",key=f"save_eval_{team['id']}_{player['id']}_{year}_{month}",use_container_width=True,type="primary"):
+        saved=execute("""INSERT INTO player_evaluations(academy_id,player_id,team_id,coach_user_id,evaluation_year,evaluation_month,technique,tactics,physical,teamwork,discipline,effort,coach_note)
+            SELECT %s,p.id,p.team_id,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s FROM players p JOIN teams t ON t.id=p.team_id JOIN coaches c ON c.id=t.coach_id
+            WHERE p.id=%s AND p.academy_id=%s AND p.team_id=%s AND p.approval_status='approved' AND p.active AND c.academy_id=%s AND c.user_id=%s AND c.active
+            ON CONFLICT(player_id,evaluation_year,evaluation_month) DO UPDATE SET academy_id=EXCLUDED.academy_id,team_id=EXCLUDED.team_id,coach_user_id=EXCLUDED.coach_user_id,technique=EXCLUDED.technique,tactics=EXCLUDED.tactics,physical=EXCLUDED.physical,teamwork=EXCLUDED.teamwork,discipline=EXCLUDED.discipline,effort=EXCLUDED.effort,coach_note=EXCLUDED.coach_note,updated_at=NOW() RETURNING id""",
+            (ACADEMY_ID,user["id"],year,month,vals["technique"],vals["tactics"],vals["physical"],vals["teamwork"],vals["discipline"],vals["effort"],note.strip() or None,player["id"],ACADEMY_ID,team["id"],ACADEMY_ID,user["id"]),True)
+        if saved:st.success(f"Месечната оценка е запазена. Общо развитие: {score:.1f} / 5");st.rerun()
+        else:st.error("Оценката не е запазена, защото футболистът не принадлежи към твой активен набор.")
+
 def parent_panel(user):
     parent_nav(); players=parent_players(user)
     if not players: st.info("Няма добавени деца към профила."); return
@@ -998,6 +1100,7 @@ def parent_panel(user):
                     poll=fetchone("SELECT * FROM polls WHERE academy_id=%s AND event_id=%s AND active ORDER BY created_at DESC LIMIT 1",(ACADEMY_ID,r["id"]))
                     if poll and squad and squad["squad_status"]=="in_group":render_poll(poll,user,child)
         if not rows: st.info("Няма добавени записи.")
+        if page == "Тренировки": render_parent_player_development(user, child)
     elif page=="Съобщения":
         rows=fetchall("SELECT * FROM team_messages WHERE academy_id=%s AND team_id=%s ORDER BY created_at DESC",(ACADEMY_ID,child.get("team_id"))) if child.get("team_id") else []
         for r in rows:
@@ -1484,61 +1587,65 @@ def coach_panel(user):
     elif sec == "Тренировки и мачове":
         multi_date_event_form("coach_event_form", teams, user["id"], fixed_team_id=team["id"])
     elif sec == "Група за мача":
-        matches = fetchall(
-            "SELECT * FROM events WHERE academy_id=%s AND team_id=%s AND event_type='match' ORDER BY starts_at ASC",
-            (ACADEMY_ID, team["id"]),
-        )
-        if not matches:
-            st.info("Няма публикувани мачове за този набор.")
-        else:
-            mmap = {f"{m['starts_at']:%d.%m.%Y %H:%M} · {m['title']}": m for m in matches}
-            match_label = st.selectbox("Избери мач", list(mmap), key="squad_match")
-            match = mmap[match_label]
-            players = fetchall(
-                "SELECT * FROM players WHERE academy_id=%s AND team_id=%s AND approval_status='approved' AND active ORDER BY first_name,last_name",
+        squad_section=st.radio("Избор",["⚽ Група за мача","📊 Статистика"],horizontal=True,key=f"coach_squad_inner_{team['id']}",label_visibility="collapsed")
+        if squad_section == "⚽ Група за мача":
+            matches = fetchall(
+                "SELECT * FROM events WHERE academy_id=%s AND team_id=%s AND event_type='match' ORDER BY starts_at ASC",
                 (ACADEMY_ID, team["id"]),
             )
-            existing = {
-                row["player_id"]: row["squad_status"]
-                for row in fetchall(
-                    "SELECT player_id,squad_status FROM match_squads WHERE academy_id=%s AND event_id=%s",
-                    (ACADEMY_ID, match["id"]),
+            if not matches:
+                st.info("Няма публикувани мачове за този набор.")
+            else:
+                mmap = {f"{m['starts_at']:%d.%m.%Y %H:%M} · {m['title']}": m for m in matches}
+                match_label = st.selectbox("Избери мач", list(mmap), key="squad_match")
+                match = mmap[match_label]
+                players = fetchall(
+                    "SELECT * FROM players WHERE academy_id=%s AND team_id=%s AND approval_status='approved' AND active ORDER BY first_name,last_name",
+                    (ACADEMY_ID, team["id"]),
                 )
-            }
-            st.caption("Използването на този списък е по желание на треньора и според договорката с родителите.")
-            with st.form(f"match_squad_{match['id']}"):
-                choices = {}
-                values = ["in_group", "not_in_group"]
-                for player in players:
-                    current = existing.get(player["id"], "not_in_group")
-                    choices[player["id"]] = st.selectbox(
-                        f"{player['first_name']} {player['last_name']}",
-                        values,
-                        index=values.index(current),
-                        format_func=lambda x: "В групата" if x == "in_group" else "Не е в групата",
-                        key=f"squad_{match['id']}_{player['id']}",
-                    )
-                create_match_poll=st.checkbox("📊 Анкета за присъствие на мача",key=f"match_poll_{match['id']}")
-                publish_squad = st.form_submit_button("Изпрати групата към родителите", use_container_width=True)
-            if publish_squad:
-                with db() as conn, conn.cursor() as cur:
-                    cur.execute(
-                        "DELETE FROM match_squads WHERE academy_id=%s AND event_id=%s",
+                existing = {
+                    row["player_id"]: row["squad_status"]
+                    for row in fetchall(
+                        "SELECT player_id,squad_status FROM match_squads WHERE academy_id=%s AND event_id=%s",
                         (ACADEMY_ID, match["id"]),
                     )
-                    for player_id, squad_status in choices.items():
-                        cur.execute(
-                            """INSERT INTO match_squads(academy_id,event_id,player_id,squad_status,selected_by)
-                               VALUES(%s,%s,%s,%s,%s)""",
-                            (ACADEMY_ID, match["id"], player_id, squad_status, user["id"]),
+                }
+                st.caption("Използването на този списък е по желание на треньора и според договорката с родителите.")
+                with st.form(f"match_squad_{match['id']}"):
+                    choices = {}
+                    values = ["in_group", "not_in_group"]
+                    for player in players:
+                        current = existing.get(player["id"], "not_in_group")
+                        choices[player["id"]] = st.selectbox(
+                            f"{player['first_name']} {player['last_name']}",
+                            values,
+                            index=values.index(current),
+                            format_func=lambda x: "В групата" if x == "in_group" else "Не е в групата",
+                            key=f"squad_{match['id']}_{player['id']}",
                         )
-                if create_match_poll:
-                    execute("UPDATE polls SET active=FALSE WHERE academy_id=%s AND event_id=%s",(ACADEMY_ID,match["id"]))
-                    execute("INSERT INTO polls(academy_id,poll_type,title,question,team_id,event_id,created_by) VALUES(%s,'match_attendance',%s,%s,%s,%s,%s)",(ACADEMY_ID,"Присъствие на мача",f"Ще присъства ли детето на {match_label}?",team["id"],match["id"],user["id"]))
-                notify_team_parents(team["id"], "match_squad", "Публикувана е група за мача", match_label)
-                st.success("Групата за мача е изпратена към родителите.")
-                st.rerun()
+                    create_match_poll=st.checkbox("📊 Анкета за присъствие на мача",key=f"match_poll_{match['id']}")
+                    publish_squad = st.form_submit_button("Изпрати групата към родителите", use_container_width=True)
+                if publish_squad:
+                    with db() as conn, conn.cursor() as cur:
+                        cur.execute(
+                            "DELETE FROM match_squads WHERE academy_id=%s AND event_id=%s",
+                            (ACADEMY_ID, match["id"]),
+                        )
+                        for player_id, squad_status in choices.items():
+                            cur.execute(
+                                """INSERT INTO match_squads(academy_id,event_id,player_id,squad_status,selected_by)
+                                   VALUES(%s,%s,%s,%s,%s)""",
+                                (ACADEMY_ID, match["id"], player_id, squad_status, user["id"]),
+                            )
+                    if create_match_poll:
+                        execute("UPDATE polls SET active=FALSE WHERE academy_id=%s AND event_id=%s",(ACADEMY_ID,match["id"]))
+                        execute("INSERT INTO polls(academy_id,poll_type,title,question,team_id,event_id,created_by) VALUES(%s,'match_attendance',%s,%s,%s,%s,%s)",(ACADEMY_ID,"Присъствие на мача",f"Ще присъства ли детето на {match_label}?",team["id"],match["id"],user["id"]))
+                    notify_team_parents(team["id"], "match_squad", "Публикувана е група за мача", match_label)
+                    st.success("Групата за мача е изпратена към родителите.")
+                    st.rerun()
 
+        else:
+            coach_player_statistics(user,team)
     elif sec == "Присъствие":
         events = fetchall("SELECT * FROM events WHERE academy_id=%s AND team_id=%s ORDER BY starts_at DESC LIMIT 40", (ACADEMY_ID, team["id"]))
         if not events: st.info("Първо създай тренировка или мач.")
