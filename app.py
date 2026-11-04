@@ -822,9 +822,41 @@ def payment_excel(rows):
     names={"cash":"В брой","bank":"По банка","card":"Карта","other":"Друго"}; data=[]
     for r in rows:data.append({"Набор":r.get("team_name") or "","Дете":f"{r['first_name']} {r['last_name']}","Месец":r["fee_month"],"Година":r["fee_year"],"Сума EUR":float(r["final_amount"]),"Статус":"Платена" if r["status"]=="paid" else "Дължима","Плащане":names.get(r.get("payment_method"),r.get("payment_method") or ""),"Дата превод":r.get("bank_transfer_date"),"Бележка":r.get("payment_note") or "","Платено на":r.get("paid_at")})
     b=io.BytesIO()
-    with pd.ExcelWriter(b,engine="openpyxl") as w:
-        pd.DataFrame(data).to_excel(w,index=False,sheet_name="Плащания"); ws=w.book["Плащания"]; ws.freeze_panes="A2"; ws.auto_filter.ref=ws.dimensions
-        for c in ws.columns:ws.column_dimensions[c[0].column_letter].width=min(max(len(str(x.value or "")) for x in c)+2,32)
+    with pd.ExcelWriter(b, engine="openpyxl") as w:
+        df = pd.DataFrame(data)
+    
+        # Excel не поддържа datetime стойности с timezone.
+        # Премахваме timezone само от Excel копието на данните.
+        for col in df.columns:
+            if pd.api.types.is_datetime64_any_dtype(df[col]):
+                try:
+                    df[col] = df[col].dt.tz_localize(None)
+                except (TypeError, AttributeError):
+                    pass
+    
+            elif df[col].dtype == "object":
+                df[col] = df[col].apply(
+                    lambda x: x.replace(tzinfo=None)
+                    if isinstance(x, datetime) and x.tzinfo is not None
+                    else x
+                )
+    
+        df.to_excel(
+            w,
+            index=False,
+            sheet_name="Плащания",
+        )
+    
+        ws = w.book["Плащания"]
+        ws.freeze_panes = "A2"
+        ws.auto_filter.ref = ws.dimensions
+    
+        for c in ws.columns:
+            ws.column_dimensions[c[0].column_letter].width = min(
+                max(len(str(x.value or "")) for x in c) + 2,
+                32,
+            )
+    
     return b.getvalue()
 
 def payment_panel(user,team_ids=None,fixed_team_id=None):
@@ -1113,11 +1145,48 @@ def parent_panel(user):
             "SELECT * FROM public_posts WHERE academy_id=%s AND published ORDER BY created_at DESC LIMIT 1",
             (ACADEMY_ID,),
         )
-        c1,c2,c3=st.columns([1,1.35,1])
-        c1.metric("Актуална информация", "1" if latest_info else "0")
+        c1, c2 = st.columns([1.6, 1])
+
+        with c1:
+            st.markdown(
+                f"""
+                <div style="
+                    min-height:140px;
+                    padding:14px;
+                    border-radius:18px;
+                    background:rgba(8,8,8,.72);
+                    border:1px solid rgba(214,183,101,.48);
+                    display:flex;
+                    align-items:center;
+                    justify-content:center;
+                    gap:14px;
+                ">
+                    {avatar_html(
+                        child.get('coach_image'),
+                        child.get('coach_image_mime'),
+                        78
+                    )}
+                    <div>
+                        <div style="font-size:.8rem;color:#c8c1b5">
+                            Треньор
+                        </div>
+                        <div style="font-size:1.02rem;font-weight:800">
+                            {child.get('coach_name') or 'Очаква свързване'}
+                        </div>
+                        <div style="font-size:.82rem;color:#c8c1b5;margin-top:4px">
+                            {child.get('team_name') or 'Без набор'}
+                        </div>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        
         with c2:
-            st.markdown(f"""<div style="min-height:140px;padding:14px;border-radius:18px;background:rgba(8,8,8,.72);border:1px solid rgba(214,183,101,.48);display:flex;align-items:center;justify-content:center;gap:14px">{avatar_html(child.get('coach_image'),child.get('coach_image_mime'),78)}<div><div style="font-size:.8rem;color:#c8c1b5">Треньор</div><div style="font-size:1.02rem;font-weight:800">{child.get('coach_name') or 'Очаква свързване'}</div><div style="font-size:.82rem;color:#c8c1b5;margin-top:4px">{child.get('team_name') or 'Без набор'}</div></div></div>""",unsafe_allow_html=True)
-        c3.metric("Такса",f"{academy()['default_fee']:.2f} EUR")
+            st.metric(
+                "Такса",
+                f"{academy()['default_fee']:.2f} EUR"
+            )
         if latest_info:
             with st.container(border=True):
                 st.subheader(latest_info["title"])
@@ -1696,7 +1765,7 @@ def coach_panel(user):
                         name_col.write(f"**{player['first_name']} {player['last_name']}**")
                         choices[player["id"]]=check_col.checkbox("В групата",value=current,key=f"squad_check_{match['id']}_{player['id']}",label_visibility="collapsed")
                     existing_poll=fetchone("SELECT id FROM polls WHERE academy_id=%s AND event_id=%s AND poll_type='match_attendance' AND active ORDER BY created_at DESC LIMIT 1",(ACADEMY_ID,match["id"]))
-                    create_match_poll=st.checkbox("📊 Изпрати анкета за присъствие на избраните футболисти",value=bool(existing_poll),key=f"match_poll_{match['id']}")
+                    create_match_poll=st.checkbox("📊 Изпрати анкета за присъствие",value=bool(existing_poll),key=f"match_poll_{match['id']}")
                     publish_squad=st.form_submit_button("Изпрати групата към родителите",use_container_width=True)
                 if publish_squad:
                     with db() as conn, conn.cursor() as cur:
