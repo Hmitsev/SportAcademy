@@ -1266,17 +1266,22 @@ def match_day_panel(user,team):
     ) or {}
     st.markdown("### 🏆 Резултат от мача")
     with st.form(f"matchday_result_{match['id']}"):
+        saved_opponent=report.get("opponent_name") or ""
         opponent=st.text_input(
             "Име на другия отбор",
-            value=report.get("opponent_name") or match.get("opponent") or "Друг отбор",
+            value="" if saved_opponent == "Друг отбор" else saved_opponent,
+            placeholder="Въведи име на отбора",
         )
         home_col,away_col=st.columns(2)
         home_score=home_col.number_input("The Lions",0,30,int(report.get("home_score") or 0))
         away_score=away_col.number_input("Другият отбор",0,30,int(report.get("away_score") or 0))
         confirm=st.form_submit_button("✅ Потвърди резултата",use_container_width=True,type="primary")
     if confirm:
-        execute(
-            """INSERT INTO match_reports(
+        if not opponent.strip():
+            st.error("Моля, въведи името на другия отбор.")
+        else:
+            execute(
+                """INSERT INTO match_reports(
                    academy_id,event_id,team_id,opponent_name,home_score,away_score,
                    standings_url,confirmed,confirmed_by,confirmed_at)
                VALUES(%s,%s,%s,%s,%s,%s,%s,TRUE,%s,NOW())
@@ -1287,13 +1292,13 @@ def match_day_panel(user,team):
                    confirmed_at=NOW(),updated_at=NOW()""",
             (ACADEMY_ID,match["id"],team["id"],opponent.strip() or "Друг отбор",
              home_score,away_score,team.get("standings_url"),user["id"]),
-        )
-        notify_team_parents(
+            )
+            notify_team_parents(
             team["id"],"match_result","Публикуван е резултат",
             f"The Lions {home_score}:{away_score} {opponent.strip() or 'Друг отбор'}",
-        )
-        st.success("Резултатът е записан и вече се вижда в „Резултати“.")
-        st.rerun()
+            )
+            st.success("Резултатът е записан и вече се вижда в „Резултати“.")
+            st.rerun()
 
 
 def results_statistics_panel(team):
@@ -1407,54 +1412,87 @@ def parent_panel(user):
                 st.caption(latest_info["created_at"].strftime("%d.%m.%Y %H:%M"))
         else:
             st.info("Няма нова информация от академията.")
-    elif page in ("Тренировки","Мачове"):
-        typ="training" if page=="Тренировки" else "match"
-        rows=fetchall("SELECT * FROM events WHERE academy_id=%s AND team_id=%s AND event_type=%s ORDER BY starts_at ASC LIMIT 40",(ACADEMY_ID,child.get("team_id"),typ)) if child.get("team_id") else []
+    elif page == "Тренировки":
+        rows=fetchall(
+            "SELECT * FROM events WHERE academy_id=%s AND team_id=%s AND event_type='training' ORDER BY starts_at ASC LIMIT 40",
+            (ACADEMY_ID,child.get("team_id")),
+        ) if child.get("team_id") else []
         for r in rows:
             with st.container(border=True):
                 st.markdown(
                     f"<div class='schedule-line' style='color:#ff2020!important;font-weight:900!important;font-size:1.12rem!important;text-shadow:0 0 2px #000,0 0 8px rgba(255,0,0,.50);'>{r['title']} · {r['starts_at']:%d.%m.%Y %H:%M} · {r.get('location') or 'Без място'}</div>",
                     unsafe_allow_html=True,
                 )
-                if r.get("description"):
-                    st.info(f"ℹ️ {r['description']}")
-                if typ == "match":
-                    report=fetchone(
-                        "SELECT * FROM match_reports WHERE academy_id=%s AND event_id=%s AND confirmed",
-                        (ACADEMY_ID,r["id"]),
+                if r.get("description"): st.info(f"ℹ️ {r['description']}")
+        if not rows: st.info("Няма добавени тренировки.")
+        render_parent_player_development(user,child)
+    elif page == "Мачове":
+        match_view=st.radio(
+            "Мачове",
+            ["⚽ Предстоящи мачове","🏆 Класиране и резултати"],
+            horizontal=True,
+            key=f"parent_match_view_{child['id']}",
+            label_visibility="collapsed",
+        )
+        if match_view == "⚽ Предстоящи мачове":
+            rows=fetchall(
+                """SELECT * FROM events WHERE academy_id=%s AND team_id=%s AND event_type='match'
+                   AND starts_at >= NOW() AND status <> 'cancelled'
+                   ORDER BY starts_at ASC LIMIT 40""",
+                (ACADEMY_ID,child.get("team_id")),
+            ) if child.get("team_id") else []
+            for r in rows:
+                with st.container(border=True):
+                    st.markdown(
+                        f"<div class='schedule-line' style='color:#ff2020!important;font-weight:900!important;font-size:1.12rem!important;text-shadow:0 0 2px #000,0 0 8px rgba(255,0,0,.50);'>{r['title']} · {r['starts_at']:%d.%m.%Y %H:%M} · {r.get('location') or 'Без място'}</div>",
+                        unsafe_allow_html=True,
                     )
-                    if report:
-                        result_status="Победа" if report["home_score"]>report["away_score"] else "Равен мач" if report["home_score"]==report["away_score"] else "Загуба"
-                        result_icon="🟢" if result_status=="Победа" else "🔵" if result_status=="Равен мач" else "🔴"
-                        st.markdown(
-                            f"### {result_icon} The Lions {report['home_score']} : {report['away_score']} {report['opponent_name']}"
-                        )
-                        st.caption(result_status)
-                    team_with_link=fetchone(
-                        "SELECT standings_url FROM teams WHERE academy_id=%s AND id=%s",
-                        (ACADEMY_ID,child.get("team_id")),
-                    ) if child.get("team_id") else None
-                    if team_with_link and team_with_link.get("standings_url"):
-                        st.link_button(
-                            "🔗 Актуално класиране",
-                            team_with_link["standings_url"],
-                            key=f"parent_standings_{r['id']}",
-                        )
-                    squad = fetchone(
+                    if r.get("description"): st.info(f"ℹ️ {r['description']}")
+                    squad=fetchone(
                         "SELECT squad_status FROM match_squads WHERE academy_id=%s AND event_id=%s AND player_id=%s",
-                        (ACADEMY_ID, r["id"], child["id"]),
+                        (ACADEMY_ID,r["id"],child["id"]),
                     )
                     if squad:
-                        if squad["squad_status"] == "in_group":
-                            st.success("🟢 Детето е в групата за този мач.")
-                        else:
-                            st.warning("🔴 Детето не е в групата за този мач.")
-                    else:
-                        st.caption("Треньорът още не е публикувал група за този мач.")
-                    poll=fetchone("SELECT * FROM polls WHERE academy_id=%s AND event_id=%s AND active ORDER BY created_at DESC LIMIT 1",(ACADEMY_ID,r["id"]))
-                    if poll and squad and squad["squad_status"]=="in_group":render_poll(poll,user,child)
-        if not rows: st.info("Няма добавени записи.")
-        if page == "Тренировки": render_parent_player_development(user, child)
+                        if squad["squad_status"] == "in_group": st.success("🟢 Детето е в групата за този мач.")
+                        else: st.warning("🔴 Детето не е в групата за този мач.")
+                    else: st.caption("Треньорът още не е публикувал група за този мач.")
+                    poll=fetchone(
+                        "SELECT * FROM polls WHERE academy_id=%s AND event_id=%s AND active ORDER BY created_at DESC LIMIT 1",
+                        (ACADEMY_ID,r["id"]),
+                    )
+                    if poll and squad and squad["squad_status"] == "in_group": render_poll(poll,user,child)
+            if not rows: st.info("Няма предстоящи мачове.")
+        else:
+            team_info=fetchone(
+                "SELECT standings_url FROM teams WHERE academy_id=%s AND id=%s",
+                (ACADEMY_ID,child.get("team_id")),
+            ) if child.get("team_id") else None
+            st.markdown("## 🏆 Класиране и резултати")
+            if team_info and team_info.get("standings_url"):
+                st.link_button("🔗 Отвори актуалното класиране",team_info["standings_url"],use_container_width=True)
+            else:
+                st.info("Все още няма добавен линк към класирането.")
+            results=fetchall(
+                """SELECT mr.*,e.title,e.starts_at,e.location FROM match_reports mr
+                   JOIN events e ON e.id=mr.event_id
+                   WHERE mr.academy_id=%s AND mr.team_id=%s AND mr.confirmed
+                   ORDER BY e.starts_at DESC""",
+                (ACADEMY_ID,child.get("team_id")),
+            ) if child.get("team_id") else []
+            if results:
+                wins=sum(1 for r in results if r["home_score"]>r["away_score"])
+                draws=sum(1 for r in results if r["home_score"]==r["away_score"])
+                losses=len(results)-wins-draws
+                for col,label,value in zip(st.columns(4),["Мачове","Победи","Равни","Загуби"],[len(results),wins,draws,losses]): col.metric(label,value)
+                st.markdown("### Последни резултати")
+                for r in results:
+                    status="Победа" if r["home_score"]>r["away_score"] else "Равен мач" if r["home_score"]==r["away_score"] else "Загуба"
+                    icon="🟢" if status=="Победа" else "🔵" if status=="Равен мач" else "🔴"
+                    with st.container(border=True):
+                        st.markdown(f"### {icon} The Lions {r['home_score']} : {r['away_score']} {r['opponent_name']}")
+                        st.caption(f"{r['starts_at']:%d.%m.%Y %H:%M} · {r['title']} · {status}")
+            else:
+                st.info("Все още няма потвърдени резултати от изминали мачове.")
     elif page=="Съобщения":
         rows=fetchall("SELECT * FROM team_messages WHERE academy_id=%s AND team_id=%s ORDER BY created_at DESC",(ACADEMY_ID,child.get("team_id"))) if child.get("team_id") else []
         for r in rows:
