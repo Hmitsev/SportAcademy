@@ -1657,7 +1657,7 @@ def coach_panel(user):
         players=fetchall("SELECT * FROM players WHERE academy_id=%s AND team_id=%s AND approval_status='approved' AND active ORDER BY first_name,last_name",(ACADEMY_ID,team["id"]))
         events=fetchone("SELECT COUNT(*) c FROM events WHERE academy_id=%s AND team_id=%s AND starts_at>=NOW()",(ACADEMY_ID,team["id"]))["c"]
         c1,c2=st.columns(2); c1.metric("Деца в групата",len(players)); c2.metric("Предстоящи събития",events)
-        st.divider(); st.subheader("👥 Моите деца")
+        st.divider(); st.subheader("⚽ Играч")
         for player in players: st.write(f"🟢 **{player['first_name']} {player['last_name']}**")
         if not players: st.info("Няма потвърдени деца в този набор.")
     elif sec == "Тренировки и мачове":
