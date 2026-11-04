@@ -1290,16 +1290,47 @@ def match_day_panel(user,team):
         (ACADEMY_ID,match["id"]),
     ) or {}
     st.markdown("### 🏆 Резултат от мача")
+
     with st.form(f"matchday_result_{match['id']}"):
-        saved_opponent=report.get("opponent_name") or ""
-        opponent=st.text_input(
-            "Име на другия отбор",
-            value="" if saved_opponent == "Друг отбор" else saved_opponent,
-            placeholder="Въведи име на отбора",
-        )
-        home_col,away_col=st.columns(2)
-        home_score=home_col.number_input("The Lions",0,30,int(report.get("home_score") or 0))
-        away_score=away_col.number_input("Другият отбор",0,30,int(report.get("away_score") or 0))
+    
+        saved_opponent = report.get("opponent_name") or ""
+    
+        home_col, away_col = st.columns(2)
+    
+        with home_col:
+            st.markdown("#### 🦁 The Lions")
+    
+            home_score = st.number_input(
+                "Голове на The Lions",
+                min_value=0,
+                max_value=30,
+                value=int(report.get("home_score") or 0),
+                key=f"home_score_{match['id']}",
+                label_visibility="collapsed",
+            )
+    
+        with away_col:
+            opponent = st.text_input(
+                "Име на противника",
+                value=(
+                    ""
+                    if saved_opponent == "Друг отбор"
+                    else saved_opponent
+                ),
+                placeholder="Друг отбор",
+                key=f"opponent_name_{match['id']}",
+                label_visibility="collapsed",
+            )
+    
+            away_score = st.number_input(
+                "Голове на противника",
+                min_value=0,
+                max_value=30,
+                value=int(report.get("away_score") or 0),
+                key=f"away_score_{match['id']}",
+                label_visibility="collapsed",
+            )
+    
         st.markdown("#### ⚽ Голмайстори")
         scorer_map={f"{p['first_name']} {p['last_name']}":p for p in squad}
         selected_scorers=st.multiselect(
