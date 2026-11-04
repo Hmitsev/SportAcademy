@@ -85,6 +85,15 @@ def valid_profile_image(uploaded_file):
         return None, None
     return image_bytes, uploaded_file.type
 
+
+def set_flash(message,kind="success"):
+    st.session_state["action_flash"]={"message":message,"kind":kind}
+
+def show_flash():
+    flash=st.session_state.pop("action_flash",None)
+    if not flash:return
+    {"success":st.success,"info":st.info,"warning":st.warning,"error":st.error}.get(flash.get("kind"),st.success)(flash.get("message") or "Действието е изпълнено.")
+
 @st.cache_resource(show_spinner=False)
 def init_db():
     statements = [
@@ -649,7 +658,7 @@ def current_user():
         """SELECT ls.user_id,u.* FROM login_sessions ls
            JOIN users u ON u.id=ls.user_id
            WHERE ls.academy_id=%s AND ls.token_hash=%s
-             AND ls.last_seen >= NOW() - INTERVAL '5 days'
+             AND ls.last_seen >= NOW() - INTERVAL '5 minutes'
              AND u.active AND u.account_status='approved'""",
         (ACADEMY_ID, session_token_hash(token)),
     )
@@ -835,7 +844,7 @@ def render_poll(poll,user,child=None):
         vals=["yes","no","maybe"]
         ans=st.radio("Избор",vals,index=vals.index(old["answer"]) if old and old["answer"] in vals else 0,format_func=lambda x:{"yes":"Да","no":"Не","maybe":"Не съм сигурен/а"}[x],horizontal=True,key=f"poll_{poll['id']}_{pid or 0}")
         if st.button("Запази отговора",key=f"poll_save_{poll['id']}_{pid or 0}",use_container_width=True):
-            execute("""INSERT INTO poll_responses(academy_id,poll_id,user_id,player_id,answer) VALUES(%s,%s,%s,%s,%s) ON CONFLICT (poll_id,user_id,(COALESCE(player_id,0))) DO UPDATE SET answer=EXCLUDED.answer,created_at=NOW()""",(ACADEMY_ID,poll["id"],user["id"],pid,ans)); st.success("Отговорът е записан.")
+            execute("""INSERT INTO poll_responses(academy_id,poll_id,user_id,player_id,answer) VALUES(%s,%s,%s,%s,%s) ON CONFLICT (poll_id,user_id,(COALESCE(player_id,0))) DO UPDATE SET answer=EXCLUDED.answer,created_at=NOW()""",(ACADEMY_ID,poll["id"],user["id"],pid,ans)); set_flash("✅ Отговорът е записан успешно."); st.rerun()
 
 def payment_rows(team_id=None):
     extra=" AND pf.team_id=%s" if team_id else ""; params=(ACADEMY_ID,team_id) if team_id else (ACADEMY_ID,)
@@ -899,7 +908,7 @@ def payment_panel(user,team_ids=None,fixed_team_id=None):
         state=r.get("confirmation_status") or ("confirmed" if r["status"]=="paid" else "unreported")
         icon={"confirmed":"🟢","pending":"🟠","unreported":"🔴"}.get(state,"🔴")
         label={"confirmed":"ПОТВЪРДЕНО","pending":"ЧАКА ADMIN","unreported":"ДЪЛЖИМА"}.get(state,"ДЪЛЖИМА")
-        with st.expander(f"{icon} {r['first_name']} {r['last_name']} · {r['final_amount']:.2f} EUR · {label}"):
+        with st.expander(f"{icon} {r['first_name']} {r['last_name']} · {r['final_amount']:.2f} € · {label}"):
             if state=="confirmed":
                 st.success("Плащането е потвърдено и е заключено за треньора.")
             elif state=="pending":
@@ -916,14 +925,14 @@ def admin_payment_confirmation_panel():
     st.subheader("✅ Потвърждение и връщане на плащания")
     for r in rows:
         icon="🟠" if r.get("confirmation_status")=="pending" else "🟢"
-        with st.expander(f"{icon} {r['first_name']} {r['last_name']} · {r.get('team_name') or ''} · {r['fee_month']:02d}.{r['fee_year']} · {r['final_amount']:.2f} EUR"):
+        with st.expander(f"{icon} {r['first_name']} {r['last_name']} · {r.get('team_name') or ''} · {r['fee_month']:02d}.{r['fee_year']} · {r['final_amount']:.2f} €"):
             st.write(f"Начин: **{r.get('payment_method') or 'не е посочен'}**")
             if r.get("payment_note"): st.write(r["payment_note"])
             a,b=st.columns(2)
             if r.get("confirmation_status")=="pending" and a.button("✅ Потвърди",key=f"admin_confirm_{r['fee_id']}",use_container_width=True):
                 execute("UPDATE player_fees SET status='paid',confirmation_status='confirmed',confirmed_by=%s,paid_at=NOW() WHERE id=%s AND academy_id=%s",(st.session_state.user_id,r["fee_id"],ACADEMY_ID)); st.rerun()
             if b.button("↩️ Върни за корекция",key=f"admin_return_{r['fee_id']}",use_container_width=True):
-                execute("UPDATE player_fees SET status='due',confirmation_status='unreported',confirmed_by=NULL,paid_at=NULL,parent_reported_at=NULL WHERE id=%s AND academy_id=%s",(r["fee_id"],ACADEMY_ID)); st.rerun()
+                execute("UPDATE player_fees SET status='due',confirmation_status='unreported',confirmed_by=NULL,paid_at=NULL,parent_reported_at=NULL WHERE id=%s AND academy_id=%s",(r["fee_id"],ACADEMY_ID)); set_flash("↩️ Плащането е върнато за корекция.","warning"); st.rerun()
 
 def financial_summary_rows():
     income = fetchall(
@@ -1016,7 +1025,7 @@ def expense_panel(user):
     for row in rows:
         with st.container(border=True):
             c1,c2=st.columns([5,1])
-            c1.write(f"**{row['expense_date']:%d.%m.%Y} · {row['category']} · {row['amount']:.2f} EUR · {names.get(row['payment_method'],row['payment_method'])}**")
+            c1.write(f"**{row['expense_date']:%d.%m.%Y} · {row['category']} · {row['amount']:.2f} € · {names.get(row['payment_method'],row['payment_method'])}**")
             if row.get("description"): c1.write(row["description"])
             if c2.button("🗑️",key=f"delete_expense_{row['id']}"):
                 execute("DELETE FROM expenses WHERE academy_id=%s AND id=%s",(ACADEMY_ID,row["id"])); st.rerun()
@@ -1193,7 +1202,7 @@ def coach_player_statistics(user,team):
             WHERE p.id=%s AND p.academy_id=%s AND p.team_id=%s AND p.approval_status='approved' AND p.active AND c.academy_id=%s AND c.user_id=%s AND c.active
             ON CONFLICT(player_id,evaluation_year,evaluation_month) DO UPDATE SET academy_id=EXCLUDED.academy_id,team_id=EXCLUDED.team_id,coach_user_id=EXCLUDED.coach_user_id,technique=EXCLUDED.technique,tactics=EXCLUDED.tactics,physical=EXCLUDED.physical,teamwork=EXCLUDED.teamwork,discipline=EXCLUDED.discipline,effort=EXCLUDED.effort,coach_note=EXCLUDED.coach_note,updated_at=NOW() RETURNING id""",
             (ACADEMY_ID,user["id"],year,month,vals["technique"],vals["tactics"],vals["physical"],vals["teamwork"],vals["discipline"],vals["effort"],note.strip() or None,player["id"],ACADEMY_ID,team["id"],ACADEMY_ID,user["id"]),True)
-        if saved:st.success(f"Месечната оценка е запазена. Общо развитие: {score:.1f} / 5");st.rerun()
+        if saved:set_flash(f"✅ Месечната оценка е запазена. Общо развитие: {score:.1f} / 5");st.rerun()
         else:st.error("Оценката не е запазена, защото футболистът не принадлежи към твой активен набор.")
 
 POSITION_OPTIONS=["Не е избрана","Вратар","Десен защитник","Централен защитник","Ляв защитник","Дефанзивен халф","Централен халф","Атакуващ халф","Дясно крило","Ляво крило","Нападател"]
@@ -1274,7 +1283,7 @@ def match_day_panel(user,team):
                      updated_by=EXCLUDED.updated_by,updated_at=NOW()""",
                 (ACADEMY_ID,match["id"],player_id,rating,note.strip() or None,user["id"]),
             )
-        st.success("Отзивите са запазени и участват в общата статистика на децата.")
+        set_flash("✅ Отзивите са запазени и участват в общата статистика на децата.")
         st.rerun()
     report=fetchone(
         "SELECT * FROM match_reports WHERE academy_id=%s AND event_id=%s",
@@ -1349,7 +1358,7 @@ def results_statistics_panel(team):
     save_col,open_col=st.columns(2)
     if save_col.button("💾 Запази линка",key=f"save_standings_{team['id']}",use_container_width=True):
         execute("UPDATE teams SET standings_url=%s WHERE academy_id=%s AND id=%s",(standings_url.strip() or None,ACADEMY_ID,team["id"]))
-        st.success("Линкът към класирането е запазен."); st.rerun()
+        set_flash("✅ Линкът към класирането е запазен."); st.rerun()
     if standings_url.strip(): open_col.link_button("🔗 Отвори класирането",standings_url.strip(),use_container_width=True)
     else: open_col.info("Няма добавен линк.")
     years = fetchall(
@@ -1384,7 +1393,7 @@ def results_statistics_panel(team):
             st.markdown(f"### {index}. {player['first_name']} {player['last_name']} · ⚽ {player['goals']}")
 
 def parent_panel(user):
-    parent_nav(); players=parent_players(user)
+    parent_nav(); show_flash(); players=parent_players(user)
     if not players: st.info("Няма добавени деца към профила."); return
     labels={f"{p['first_name']} {p['last_name']}":p for p in players}; chosen=st.selectbox("Избрано дете",list(labels)); child=labels[chosen]
     st.caption(f"Група: {child.get('team_name') or 'Очаква свързване'} · Треньор: {child.get('coach_name') or 'Очаква свързване'}")
@@ -1552,13 +1561,13 @@ def parent_panel(user):
         rows=fetchall("SELECT * FROM player_fees WHERE academy_id=%s AND player_id=%s ORDER BY fee_year DESC,fee_month DESC",(ACADEMY_ID,child["id"]))
         for r in rows:
             paid=r["status"]=="paid"; pending=r.get("confirmation_status")=="pending"; icon="🟢" if paid else "🟠" if pending else "🔴"; label="ПЛАТЕНА" if paid else "ЧАКА ПОТВЪРЖДЕНИЕ" if pending else "ДЪЛЖИМА"
-            with st.expander(f"{icon} {r['fee_month']:02d}.{r['fee_year']} · {r['final_amount']:.2f} EUR · {label}"):
+            with st.expander(f"{icon} {r['fee_month']:02d}.{r['fee_year']} · {r['final_amount']:.2f} € · {label}"):
                 st.write(f"**{icon} {label}**")
                 if not paid:
                     method=st.radio("Начин на плащане",["cash","bank","card"],format_func=lambda x:{"cash":"В брой","bank":"По банка","card":"С карта"}[x],horizontal=True,key=f"choice_{r['id']}")
                     if method=="bank":
                         d=st.date_input("Дата на превода",date.today(),key=f"bd_{r['id']}")
-                        if st.button("Изпрати информацията",key=f"bs_{r['id']}",use_container_width=True):execute("UPDATE player_fees SET payment_method='bank',bank_transfer_date=%s,payment_note='Заявено от родител',confirmation_status='pending',parent_reported_at=NOW() WHERE id=%s",(d,r["id"]));notify_admins("bank_payment","Заявен банков превод",f"{child['first_name']} {child['last_name']} · {child.get('team_name') or 'Без набор'} · {d:%d.%m.%Y}");st.success("Изпратено. Администраторът трябва да потвърди плащането.")
+                        if st.button("Изпрати информацията",key=f"bs_{r['id']}",use_container_width=True):execute("UPDATE player_fees SET payment_method='bank',bank_transfer_date=%s,payment_note='Заявено от родител',confirmation_status='pending',parent_reported_at=NOW() WHERE id=%s",(d,r["id"]));notify_admins("bank_payment","Заявен банков превод",f"{child['first_name']} {child['last_name']} · {child.get('team_name') or 'Без набор'} · {d:%d.%m.%Y}");set_flash("🟠 Изпратено. Плащането чака потвърждение от администратор.","warning");st.rerun()
                     elif method=="cash":st.info("Плащането в брой се потвърждава от треньор или администратор.")
                     else:st.info("Плащането с карта предстои.")
         if not rows:st.info("Няма начислени такси.")
@@ -1597,7 +1606,7 @@ def parent_panel(user):
                         (ACADEMY_ID,user["id"],child["id"],coach_user["user_id"],feedback_type,rating,subject.strip(),body.strip()),
                     )
                     create_notification(coach_user["user_id"], "feedback", "Нова обратна връзка от родител", subject.strip())
-                    st.success("Обратната връзка е изпратена само към треньора.")
+                    set_flash("✅ Обратната връзка е изпратена само към треньора."); st.rerun()
     else:
         st.subheader("Профил и деца")
         with st.form("add_child_later"):
@@ -1757,7 +1766,7 @@ def multi_date_event_form(form_key, teams, user_id, fixed_team_id=None):
                     "Публикуван е нов тренировъчен график",
                     f"Създадени са {len(schedule)} тренировки за периода {start_date:%d.%m.%Y} - {end_date:%d.%m.%Y}.",
                 )
-                st.success(f"Създадени са {len(schedule)} тренировки.")
+                set_flash(f"✅ Графикът е публикуван. Създадени са {len(schedule)} тренировки.")
                 st.rerun()
 
     else:
@@ -1809,7 +1818,7 @@ def multi_date_event_form(form_key, teams, user_id, fixed_team_id=None):
                     "Публикуван е нов мач",
                     f"{title.strip()} · {event_date:%d.%m.%Y} {event_time:%H:%M}",
                 )
-                st.success("Мачът е създаден успешно.")
+                set_flash("✅ Мачът е създаден и родителите са уведомени.")
                 st.rerun()
 
 def coach_account_manager():
@@ -1857,6 +1866,7 @@ def coach_account_manager():
 def admin_panel(user):
     count = unread_notification_count(user["id"])
     st.title("Административен панел")
+    show_flash()
     if count > 0:
         with st.expander(f"🔔 {count} нови известия", expanded=False):
             notification_center(user)
@@ -2137,7 +2147,7 @@ def admin_panel(user):
                 for pid,(use,custom) in selected.items():
                     if use: execute("""INSERT INTO player_fees(academy_id,player_id,team_id,fee_year,fee_month,standard_amount,final_amount,adjustment_reason,custom_status,due_date)
                         VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(player_id,fee_year,fee_month) DO UPDATE SET standard_amount=EXCLUDED.standard_amount,final_amount=EXCLUDED.final_amount,adjustment_reason=EXCLUDED.adjustment_reason,custom_status=EXCLUDED.custom_status""",(ACADEMY_ID,pid,team["id"],int(year),month,amount,custom,reason.strip() or None,"force_majeure" if custom!=amount else None,date(int(year),month,28)))
-                st.success("Таксите са начислени."); st.rerun()
+                set_flash("✅ Таксите са начислени на маркираните деца."); st.rerun()
         elif fee_page == "Справка":
             payment_panel(user)
             st.divider()
@@ -2184,6 +2194,7 @@ def admin_panel(user):
 def coach_panel(user):
     coach = fetchone("SELECT * FROM coaches WHERE academy_id=%s AND user_id=%s AND active", (ACADEMY_ID, user["id"]))
     st.title("Треньорски панел")
+    show_flash()
     coach_unread = unread_notification_count(user["id"])
     if coach_unread > 0:
         with st.expander(f"🔔 {coach_unread} нови известия", expanded=False):
@@ -2246,7 +2257,7 @@ def coach_panel(user):
                         name_col.write(f"**{player['first_name']} {player['last_name']}**")
                         choices[player["id"]]=check_col.checkbox("В групата",value=current,key=f"squad_check_{match['id']}_{player['id']}",label_visibility="collapsed")
                     existing_poll=fetchone("SELECT id FROM polls WHERE academy_id=%s AND event_id=%s AND poll_type='match_attendance' AND active ORDER BY created_at DESC LIMIT 1",(ACADEMY_ID,match["id"]))
-                    create_match_poll=st.checkbox("📊 Изпрати анкета за присъствие",value=bool(existing_poll),key=f"match_poll_{match['id']}")
+                    create_match_poll=st.checkbox("📊 Изпрати анкета до родителите на избраните деца",value=False,key=f"match_poll_{match['id']}")
                     publish_squad=st.form_submit_button("Изпрати групата към родителите",use_container_width=True)
                 if publish_squad:
                     with db() as conn, conn.cursor() as cur:
@@ -2284,7 +2295,7 @@ def coach_panel(user):
                     execute("""INSERT INTO attendance(academy_id,event_id,player_id,status,marked_by) VALUES(%s,%s,%s,%s,%s)
                                ON CONFLICT(event_id,player_id) DO UPDATE SET status=EXCLUDED.status,marked_by=EXCLUDED.marked_by,marked_at=NOW()""",
                             (ACADEMY_ID,event["id"],player_id,status,user["id"]))
-                st.success("Присъствието е запазено.")
+                set_flash("✅ Присъствието е запазено успешно."); st.rerun()
     elif sec == "Такси":
         payment_panel(user,[t["id"] for t in teams],fixed_team_id=team["id"])
     elif sec == "Съобщения":
