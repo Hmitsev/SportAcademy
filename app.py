@@ -649,7 +649,7 @@ def current_user():
         """SELECT ls.user_id,u.* FROM login_sessions ls
            JOIN users u ON u.id=ls.user_id
            WHERE ls.academy_id=%s AND ls.token_hash=%s
-             AND ls.last_seen >= NOW() - INTERVAL '5 minutes'
+             AND ls.last_seen >= NOW() - INTERVAL '5 days'
              AND u.active AND u.account_status='approved'""",
         (ACADEMY_ID, session_token_hash(token)),
     )
