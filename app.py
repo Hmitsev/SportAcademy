@@ -1627,38 +1627,190 @@ def save_events_for_dates(user_id, team_id, event_type, title, dates, event_time
 
 def multi_date_event_form(form_key, teams, user_id, fixed_team_id=None):
     tmap = {t["name"]: t["id"] for t in teams}
-    count = st.number_input("Брой календарни дати", 1, 15, 1, key=f"{form_key}_count")
-    with st.form(form_key):
-        typ = st.radio("Тип", ["training", "match"],
-                       format_func=lambda x: "🏃 Тренировка" if x == "training" else "⚽ Мач",
-                       horizontal=True, key=f"{form_key}_type")
-        if typ == "training":
-            st.success("🏃 ИЗБРАНО: ТРЕНИРОВКА")
-        else:
-            st.warning("⚽ ИЗБРАНО: МАЧ")
+    typ = st.radio(
+        "Какво добавяш?",
+        ["training", "match"],
+        format_func=lambda x: "🏃 Тренировъчен график" if x == "training" else "⚽ Единичен мач",
+        horizontal=True,
+        key=f"{form_key}_type",
+    )
+
+    if typ == "training":
+        st.success("🏃 Създаване на повтарящ се тренировъчен график")
         if fixed_team_id is None:
-            team_name = st.selectbox("Набор", list(tmap), key=f"{form_key}_team")
+            team_name = st.selectbox("Набор", list(tmap), key=f"{form_key}_training_team")
             team_id = tmap[team_name]
         else:
             team_id = fixed_team_id
-        title = st.text_input("Заглавие", key=f"{form_key}_title")
-        event_dates = []
-        for index in range(int(count)):
-            event_dates.append(st.date_input(f"Дата {index + 1}", date.today() + timedelta(days=index), key=f"{form_key}_date_{index}"))
-        event_time = st.time_input("Час", key=f"{form_key}_time")
-        location = st.text_input("Място", key=f"{form_key}_location")
-        description = st.text_area("Описание", key=f"{form_key}_description")
-        save = st.form_submit_button("Публикувай всички дати", use_container_width=True)
-    if save:
-        if not title.strip():
-            st.error("Въведи заглавие.")
-        elif len(set(event_dates)) != len(event_dates):
-            st.error("Има повторена дата. Избери различни календарни дни.")
-        else:
-            created = save_events_for_dates(user_id, team_id, typ, title, sorted(event_dates), event_time, location, description)
-            st.success(f"Създадени са {created} събития.")
-            st.rerun()
 
+        title = st.text_input(
+            "Заглавие",
+            value="Тренировка",
+            key=f"{form_key}_training_title",
+        )
+        location = st.text_input("Място", key=f"{form_key}_training_location")
+        description = st.text_area("Допълнителна информация", key=f"{form_key}_training_description")
+
+        st.markdown("### 1. Избери тренировъчните дни")
+        weekday_options = {
+            "Понеделник": 0,
+            "Вторник": 1,
+            "Сряда": 2,
+            "Четвъртък": 3,
+            "Петък": 4,
+            "Събота": 5,
+            "Неделя": 6,
+        }
+        selected_days = st.multiselect(
+            "Дни от седмицата",
+            list(weekday_options),
+            placeholder="Избери един или повече дни",
+            key=f"{form_key}_weekdays",
+        )
+
+        st.markdown("### 2. Задай час за всеки избран ден")
+        day_times = {}
+        if selected_days:
+            time_columns = st.columns(2)
+            for index, day_name in enumerate(selected_days):
+                day_times[day_name] = time_columns[index % 2].time_input(
+                    day_name,
+                    value=datetime.strptime("18:30", "%H:%M").time(),
+                    key=f"{form_key}_time_{weekday_options[day_name]}",
+                )
+        else:
+            st.info("Първо избери тренировъчните дни.")
+
+        st.markdown("### 3. Избери период")
+        period_col_1, period_col_2 = st.columns(2)
+        start_date = period_col_1.date_input(
+            "От дата",
+            value=date.today(),
+            key=f"{form_key}_period_start",
+        )
+        end_date = period_col_2.date_input(
+            "До дата",
+            value=date.today() + timedelta(days=30),
+            key=f"{form_key}_period_end",
+        )
+
+        schedule = []
+        if selected_days and end_date >= start_date:
+            current_date = start_date
+            while current_date <= end_date:
+                for day_name in selected_days:
+                    if current_date.weekday() == weekday_options[day_name]:
+                        schedule.append((current_date, day_times[day_name], day_name))
+                current_date += timedelta(days=1)
+            schedule.sort(key=lambda item: (item[0], item[1]))
+
+        st.markdown("### 4. Преглед на графика")
+        if end_date < start_date:
+            st.error("Крайната дата не може да бъде преди началната дата.")
+        elif selected_days and not schedule:
+            st.warning("В избрания период няма дати за посочените дни.")
+        elif schedule:
+            st.info(f"Ще бъдат създадени {len(schedule)} тренировки.")
+            with st.expander("Покажи всички дати", expanded=len(schedule) <= 10):
+                for event_date, event_time, day_name in schedule:
+                    st.write(f"✅ {day_name} · {event_date:%d.%m.%Y} · {event_time:%H:%M}")
+
+        if st.button(
+            f"✅ Потвърди и създай {len(schedule)} тренировки" if schedule else "✅ Създай тренировъчния график",
+            key=f"{form_key}_save_training_schedule",
+            use_container_width=True,
+            type="primary",
+            disabled=not schedule,
+        ):
+            if not title.strip():
+                st.error("Въведи заглавие.")
+            elif not selected_days:
+                st.error("Избери поне един тренировъчен ден.")
+            elif end_date < start_date:
+                st.error("Провери периода.")
+            else:
+                # Обновяваме само тренировките за избрания набор. Мачовете не се засягат.
+                with db() as conn, conn.cursor() as cur:
+                    cur.execute(
+                        "DELETE FROM events WHERE academy_id=%s AND team_id=%s AND event_type='training'",
+                        (ACADEMY_ID, team_id),
+                    )
+                    for event_date, event_time, _ in schedule:
+                        cur.execute(
+                            """INSERT INTO events(
+                                   academy_id,team_id,event_type,title,starts_at,
+                                   location,description,created_by)
+                               VALUES(%s,%s,'training',%s,%s,%s,%s,%s)""",
+                            (
+                                ACADEMY_ID,
+                                team_id,
+                                title.strip(),
+                                datetime.combine(event_date, event_time),
+                                location.strip() or None,
+                                description.strip() or None,
+                                user_id,
+                            ),
+                        )
+                notify_team_parents(
+                    team_id,
+                    "training_schedule",
+                    "Публикуван е нов тренировъчен график",
+                    f"Създадени са {len(schedule)} тренировки за периода {start_date:%d.%m.%Y} - {end_date:%d.%m.%Y}.",
+                )
+                st.success(f"Създадени са {len(schedule)} тренировки.")
+                st.rerun()
+
+    else:
+        st.info("⚽ Създаване на единичен мач")
+        with st.form(f"{form_key}_single_match"):
+            if fixed_team_id is None:
+                team_name = st.selectbox("Набор", list(tmap), key=f"{form_key}_match_team")
+                team_id = tmap[team_name]
+            else:
+                team_id = fixed_team_id
+
+            title = st.text_input("Заглавие на мача", key=f"{form_key}_match_title")
+            opponent = st.text_input(
+                "Противник",
+                placeholder="Въведи име на отбора",
+                key=f"{form_key}_match_opponent",
+            )
+            event_date = st.date_input("Дата", date.today(), key=f"{form_key}_match_date")
+            event_time = st.time_input("Час", key=f"{form_key}_match_time")
+            location = st.text_input("Място", key=f"{form_key}_match_location")
+            description = st.text_area("Допълнителна информация", key=f"{form_key}_match_description")
+            save_match = st.form_submit_button("⚽ Създай мача", use_container_width=True, type="primary")
+
+        if save_match:
+            if not title.strip():
+                st.error("Въведи заглавие на мача.")
+            elif not opponent.strip():
+                st.error("Въведи името на противника.")
+            else:
+                execute(
+                    """INSERT INTO events(
+                           academy_id,team_id,event_type,title,opponent,starts_at,
+                           location,description,created_by)
+                       VALUES(%s,%s,'match',%s,%s,%s,%s,%s,%s)""",
+                    (
+                        ACADEMY_ID,
+                        team_id,
+                        title.strip(),
+                        opponent.strip(),
+                        datetime.combine(event_date, event_time),
+                        location.strip() or None,
+                        description.strip() or None,
+                        user_id,
+                    ),
+                )
+                notify_team_parents(
+                    team_id,
+                    "match",
+                    "Публикуван е нов мач",
+                    f"{title.strip()} · {event_date:%d.%m.%Y} {event_time:%H:%M}",
+                )
+                st.success("Мачът е създаден успешно.")
+                st.rerun()
 
 def coach_account_manager():
     coaches = fetchall("""SELECT c.*,u.email,u.account_status,u.active user_active
