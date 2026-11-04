@@ -240,6 +240,28 @@ def init_db():
         """ALTER TABLE coaches ADD COLUMN IF NOT EXISTS profile_image BYTEA""",
         """ALTER TABLE coaches ADD COLUMN IF NOT EXISTS profile_image_mime TEXT""",
         """ALTER TABLE academies ADD COLUMN IF NOT EXISTS parent_help_video_url TEXT""",
+        """ALTER TABLE players ADD COLUMN IF NOT EXISTS position TEXT""",
+        """ALTER TABLE player_fees ADD COLUMN IF NOT EXISTS confirmation_status TEXT NOT NULL DEFAULT 'unreported'""",
+        """ALTER TABLE player_fees ADD COLUMN IF NOT EXISTS parent_reported_at TIMESTAMPTZ""",
+        """ALTER TABLE player_fees ADD COLUMN IF NOT EXISTS confirmed_by BIGINT REFERENCES users(id) ON DELETE SET NULL""",
+        """CREATE TABLE IF NOT EXISTS match_reports(
+            id BIGSERIAL PRIMARY KEY, academy_id BIGINT NOT NULL REFERENCES academies(id) ON DELETE CASCADE,
+            event_id BIGINT NOT NULL REFERENCES events(id) ON DELETE CASCADE, team_id BIGINT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+            opponent_name TEXT NOT NULL DEFAULT 'Друг отбор', home_score INTEGER NOT NULL DEFAULT 0 CHECK(home_score>=0),
+            away_score INTEGER NOT NULL DEFAULT 0 CHECK(away_score>=0), standings_url TEXT, confirmed BOOLEAN NOT NULL DEFAULT FALSE,
+            confirmed_by BIGINT REFERENCES users(id) ON DELETE SET NULL, confirmed_at TIMESTAMPTZ, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            UNIQUE(event_id))""",
+        """CREATE TABLE IF NOT EXISTS match_lineups(
+            id BIGSERIAL PRIMARY KEY, academy_id BIGINT NOT NULL REFERENCES academies(id) ON DELETE CASCADE,
+            event_id BIGINT NOT NULL REFERENCES events(id) ON DELETE CASCADE, player_id BIGINT NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+            pitch_slot TEXT NOT NULL, updated_by BIGINT REFERENCES users(id) ON DELETE SET NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            UNIQUE(event_id,player_id), UNIQUE(event_id,pitch_slot))""",
+        """CREATE TABLE IF NOT EXISTS match_player_stats(
+            id BIGSERIAL PRIMARY KEY, academy_id BIGINT NOT NULL REFERENCES academies(id) ON DELETE CASCADE,
+            event_id BIGINT NOT NULL REFERENCES events(id) ON DELETE CASCADE, player_id BIGINT NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+            goals INTEGER NOT NULL DEFAULT 0 CHECK(goals>=0), match_rating INTEGER CHECK(match_rating BETWEEN 1 AND 5), note TEXT,
+            updated_by BIGINT REFERENCES users(id) ON DELETE SET NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), UNIQUE(event_id,player_id))""",
+        """ALTER TABLE player_evaluations ADD COLUMN IF NOT EXISTS match_bonus NUMERIC(4,2) NOT NULL DEFAULT 0""",
         """CREATE INDEX IF NOT EXISTS idx_fees_player ON player_fees(academy_id,player_id,fee_year,fee_month)""",
     ]
     with db() as conn, conn.cursor() as cur:
@@ -816,7 +838,7 @@ def render_poll(poll,user,child=None):
 
 def payment_rows(team_id=None):
     extra=" AND pf.team_id=%s" if team_id else ""; params=(ACADEMY_ID,team_id) if team_id else (ACADEMY_ID,)
-    return fetchall(f"""SELECT pf.id fee_id,t.name team_name,p.first_name,p.last_name,pf.fee_month,pf.fee_year,pf.final_amount,pf.status,pf.payment_method,pf.bank_transfer_date,pf.payment_note,pf.paid_at FROM player_fees pf JOIN players p ON p.id=pf.player_id LEFT JOIN teams t ON t.id=pf.team_id WHERE pf.academy_id=%s {extra} ORDER BY t.birth_year,p.last_name,p.first_name,pf.fee_year DESC,pf.fee_month DESC""",params)
+    return fetchall(f"""SELECT pf.id fee_id,t.name team_name,p.first_name,p.last_name,pf.fee_month,pf.fee_year,pf.final_amount,pf.status,pf.payment_method,pf.bank_transfer_date,pf.payment_note,pf.paid_at,pf.confirmation_status,pf.parent_reported_at FROM player_fees pf JOIN players p ON p.id=pf.player_id LEFT JOIN teams t ON t.id=pf.team_id WHERE pf.academy_id=%s {extra} ORDER BY t.birth_year,p.last_name,p.first_name,pf.fee_year DESC,pf.fee_month DESC""",params)
 
 def payment_excel(rows):
     names={"cash":"В брой","bank":"По банка","card":"Карта","other":"Друго"}; data=[]
@@ -860,22 +882,47 @@ def payment_excel(rows):
     return b.getvalue()
 
 def payment_panel(user,team_ids=None,fixed_team_id=None):
-    teams=fetchall("SELECT * FROM teams WHERE academy_id=%s AND active ORDER BY birth_year",(ACADEMY_ID,)); teams=[t for t in teams if team_ids is None or t["id"] in team_ids]
-    if not teams:st.info("Няма набори.");return
-    m={t["name"]:t for t in teams}
-    if fixed_team_id is not None:
-        team=next((item for item in teams if item["id"]==fixed_team_id),None)
-        if not team: st.warning("Избраният набор не е достъпен."); return
-        st.caption(f"Набор: {team['name']}")
-    else:
-        team=m[st.selectbox("Набор",list(m),key=f"fee_team_{user['id']}")]
-    for r in payment_rows(team["id"]):
-        icon="🟢" if r["status"]=="paid" else "🔴"
-        with st.expander(f"{icon} {r['first_name']} {r['last_name']} · {r['fee_month']:02d}.{r['fee_year']} · {r['final_amount']:.2f} EUR"):
-            method=st.selectbox("Начин",["cash","bank","card","other"],format_func=lambda x:{"cash":"В брой","bank":"По банка","card":"Карта","other":"Друго"}[x],key=f"pm_{user['id']}_{r['fee_id']}")
-            note=st.text_input("Бележка",key=f"pn_{user['id']}_{r['fee_id']}")
-            if st.button("Отбележи като платена",key=f"pp_{user['id']}_{r['fee_id']}",use_container_width=True):execute("UPDATE player_fees SET status='paid',payment_method=%s,payment_note=%s,payment_recorded_by=%s,paid_at=NOW() WHERE id=%s AND academy_id=%s",(method,note.strip() or None,user["id"],r["fee_id"],ACADEMY_ID));st.rerun()
+    teams=fetchall("SELECT * FROM teams WHERE academy_id=%s AND active ORDER BY birth_year",(ACADEMY_ID,))
+    teams=[t for t in teams if team_ids is None or t["id"] in team_ids]
+    if not teams: st.info("Няма набори."); return
+    team_map={t["name"]:t for t in teams}
+    default_team=next((t for t in teams if t["id"]==fixed_team_id),teams[0])
+    team_name=st.selectbox("Набор",list(team_map),index=list(team_map).index(default_team["name"]),key=f"fee_team_{user['id']}")
+    team=team_map[team_name]
+    now=date.today(); c1,c2=st.columns(2)
+    month=c1.selectbox("Месец",range(1,13),index=now.month-1,key=f"fee_month_{user['id']}_{team['id']}")
+    year=int(c2.number_input("Година",2024,2045,now.year,key=f"fee_year_{user['id']}_{team['id']}"))
+    rows=[r for r in payment_rows(team["id"]) if int(r["fee_month"])==month and int(r["fee_year"])==year]
+    if not rows: st.info("Няма начислени такси за избрания набор и месец.")
+    for r in rows:
+        state=r.get("confirmation_status") or ("confirmed" if r["status"]=="paid" else "unreported")
+        icon={"confirmed":"🟢","pending":"🟠","unreported":"🔴"}.get(state,"🔴")
+        label={"confirmed":"ПОТВЪРДЕНО","pending":"ЧАКА ADMIN","unreported":"ДЪЛЖИМА"}.get(state,"ДЪЛЖИМА")
+        with st.expander(f"{icon} {r['first_name']} {r['last_name']} · {r['final_amount']:.2f} EUR · {label}"):
+            if state=="confirmed":
+                st.success("Плащането е потвърдено и е заключено за треньора.")
+            elif state=="pending":
+                st.warning("Плащането е заявено и чака потвърждение от администратор.")
+            else:
+                method=st.selectbox("Начин",["cash","bank","card","other"],format_func=lambda x:{"cash":"В брой","bank":"По банка","card":"Карта","other":"Друго"}[x],key=f"pm_{user['id']}_{r['fee_id']}")
+                note=st.text_input("Бележка",key=f"pn_{user['id']}_{r['fee_id']}")
+                if st.button("Изпрати за потвърждение",key=f"pp_{user['id']}_{r['fee_id']}",use_container_width=True):
+                    execute("UPDATE player_fees SET confirmation_status='pending',payment_method=%s,payment_note=%s,payment_recorded_by=%s,parent_reported_at=NOW() WHERE id=%s AND academy_id=%s AND status<>'paid'",(method,note.strip() or None,user["id"],r["fee_id"],ACADEMY_ID)); notify_admins("payment_pending","Плащане чака потвърждение",f"{r['first_name']} {r['last_name']} · {month:02d}.{year}"); st.rerun()
     st.download_button("📥 Excel: всички набори и деца",payment_excel(payment_rows()),"academy_payments.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True)
+
+def admin_payment_confirmation_panel():
+    rows=fetchall("""SELECT pf.id fee_id,pf.*,p.first_name,p.last_name,t.name team_name FROM player_fees pf JOIN players p ON p.id=pf.player_id LEFT JOIN teams t ON t.id=pf.team_id WHERE pf.academy_id=%s AND (pf.confirmation_status='pending' OR pf.status='paid') ORDER BY pf.fee_year DESC,pf.fee_month DESC,t.birth_year,p.first_name""",(ACADEMY_ID,))
+    st.subheader("✅ Потвърждение и връщане на плащания")
+    for r in rows:
+        icon="🟠" if r.get("confirmation_status")=="pending" else "🟢"
+        with st.expander(f"{icon} {r['first_name']} {r['last_name']} · {r.get('team_name') or ''} · {r['fee_month']:02d}.{r['fee_year']} · {r['final_amount']:.2f} EUR"):
+            st.write(f"Начин: **{r.get('payment_method') or 'не е посочен'}**")
+            if r.get("payment_note"): st.write(r["payment_note"])
+            a,b=st.columns(2)
+            if r.get("confirmation_status")=="pending" and a.button("✅ Потвърди",key=f"admin_confirm_{r['fee_id']}",use_container_width=True):
+                execute("UPDATE player_fees SET status='paid',confirmation_status='confirmed',confirmed_by=%s,paid_at=NOW() WHERE id=%s AND academy_id=%s",(st.session_state.user_id,r["fee_id"],ACADEMY_ID)); st.rerun()
+            if b.button("↩️ Върни за корекция",key=f"admin_return_{r['fee_id']}",use_container_width=True):
+                execute("UPDATE player_fees SET status='due',confirmation_status='unreported',confirmed_by=NULL,paid_at=NULL,parent_reported_at=NULL WHERE id=%s AND academy_id=%s",(r["fee_id"],ACADEMY_ID)); st.rerun()
 
 def financial_summary_rows():
     income = fetchall(
@@ -1079,6 +1126,10 @@ def render_parent_player_development(user,child):
     period_label="целия наличен период" if selected_period=="Всички оценки" else selected_period
     period_averages={field:sum(float(row[field]) for row in period_rows)/len(period_rows) for _,field in labels}
     period_total=sum(period_averages.values())/len(period_averages)
+    match_rating_row=fetchone("SELECT AVG(mps.match_rating)::numeric avg_rating FROM match_player_stats mps JOIN events e ON e.id=mps.event_id WHERE mps.academy_id=%s AND mps.player_id=%s AND mps.match_rating IS NOT NULL",(ACADEMY_ID,child["id"]))
+    if match_rating_row and match_rating_row.get("avg_rating") is not None:
+        match_avg=float(match_rating_row["avg_rating"]); period_total=period_total*0.80+match_avg*0.20
+        st.caption(f"Общата оценка включва 80% месечно развитие и 20% оценки от мачове. Средна мачова оценка: {match_avg:.1f}/5")
     st.markdown(f"### 📈 Обобщено развитие за {period_label}")
     metric_cols=st.columns(3)
     for index,(label,field) in enumerate(labels): metric_cols[index%3].metric(label,f"{period_averages[field]:.1f} / 5")
@@ -1128,6 +1179,78 @@ def coach_player_statistics(user,team):
         if saved:st.success(f"Месечната оценка е запазена. Общо развитие: {score:.1f} / 5");st.rerun()
         else:st.error("Оценката не е запазена, защото футболистът не принадлежи към твой активен набор.")
 
+POSITION_OPTIONS=["Не е избрана","Вратар","Десен защитник","Централен защитник","Ляв защитник","Дефанзивен халф","Централен халф","Атакуващ халф","Дясно крило","Ляво крило","Нападател"]
+PITCH_SLOTS=[("GK","Вратар"),("LB","Ляв защитник"),("CB1","Централен защитник 1"),("CB2","Централен защитник 2"),("RB","Десен защитник"),("DM","Дефанзивен халф"),("CM","Централен халф"),("AM","Атакуващ халф"),("LW","Ляво крило"),("RW","Дясно крило"),("ST","Нападател")]
+
+def player_card(player,position_edit=False,key_prefix="player"):
+    c1,c2=st.columns([5,1])
+    with c1:
+        st.write(f"**{player['first_name']} {player['last_name']}**")
+        st.caption(player.get("position") or "Позиция не е избрана")
+        if position_edit:
+            current=player.get("position") or "Не е избрана"
+            pos=st.selectbox("Позиция",POSITION_OPTIONS,index=POSITION_OPTIONS.index(current) if current in POSITION_OPTIONS else 0,key=f"{key_prefix}_position_{player['id']}",label_visibility="collapsed")
+            if pos!=current:
+                execute("UPDATE players SET position=%s WHERE id=%s AND academy_id=%s",(None if pos=="Не е избрана" else pos,player["id"],ACADEMY_ID)); st.rerun()
+    with c2: st.markdown(avatar_html(player.get("profile_image"),player.get("profile_image_mime"),64),unsafe_allow_html=True)
+
+def match_day_panel(user,team):
+    matches=fetchall("SELECT * FROM events WHERE academy_id=%s AND team_id=%s AND event_type='match' ORDER BY starts_at DESC",(ACADEMY_ID,team["id"]))
+    if not matches: st.info("Няма публикувани мачове."); return
+    mmap={f"{m['starts_at']:%d.%m.%Y %H:%M} · {m['title']}":m for m in matches}; label=st.selectbox("Мач",list(mmap),key=f"md_match_{team['id']}"); match=mmap[label]
+    squad=fetchall("""SELECT p.*,ms.squad_status FROM match_squads ms JOIN players p ON p.id=ms.player_id WHERE ms.academy_id=%s AND ms.event_id=%s AND ms.squad_status='in_group' ORDER BY p.position,p.first_name""",(ACADEMY_ID,match["id"]))
+    if not squad: st.warning("Първо потвърди групата за мача."); return
+    st.markdown("### 🟩 Виртуално тактическо табло")
+    st.caption("Надежден вариант за Streamlit: избираш позиция за всеки играч. Таблото се обновява като виртуален стадион без рисков drag-and-drop компонент.")
+    lineup={r["player_id"]:r["pitch_slot"] for r in fetchall("SELECT player_id,pitch_slot FROM match_lineups WHERE academy_id=%s AND event_id=%s",(ACADEMY_ID,match["id"]))}
+    pmap={f"{p['first_name']} {p['last_name']} · {p.get('position') or 'без позиция'}":p for p in squad}
+    assigned=set(lineup)
+    cols=st.columns(3)
+    for i,(slot,slot_name) in enumerate(PITCH_SLOTS):
+        current_pid=next((pid for pid,sl in lineup.items() if sl==slot),None)
+        options=["— Свободно —"]+[name for name,p in pmap.items() if p["id"] not in assigned or p["id"]==current_pid]
+        current_name=next((name for name,p in pmap.items() if p["id"]==current_pid),"— Свободно —")
+        choice=cols[i%3].selectbox(slot_name,options,index=options.index(current_name) if current_name in options else 0,key=f"pitch_{match['id']}_{slot}")
+        if choice!=current_name:
+            execute("DELETE FROM match_lineups WHERE academy_id=%s AND event_id=%s AND pitch_slot=%s",(ACADEMY_ID,match["id"],slot))
+            if choice!="— Свободно —":
+                pid=pmap[choice]["id"]; execute("DELETE FROM match_lineups WHERE academy_id=%s AND event_id=%s AND player_id=%s",(ACADEMY_ID,match["id"],pid)); execute("INSERT INTO match_lineups(academy_id,event_id,player_id,pitch_slot,updated_by) VALUES(%s,%s,%s,%s,%s)",(ACADEMY_ID,match["id"],pid,slot,user["id"]))
+            st.rerun()
+    st.markdown("### ⭐ Оценки и голмайстори")
+    oldstats={r["player_id"]:r for r in fetchall("SELECT * FROM match_player_stats WHERE academy_id=%s AND event_id=%s",(ACADEMY_ID,match["id"]))}
+    with st.form(f"match_stats_{match['id']}"):
+        values={}
+        for p in squad:
+            a,b,c=st.columns([4,2,2]); a.write(f"**{p['first_name']} {p['last_name']}** · {p.get('position') or 'без позиция'}"); old=oldstats.get(p["id"],{})
+            goals=b.number_input("Голове",0,20,int(old.get("goals") or 0),key=f"goals_{match['id']}_{p['id']}")
+            rating=c.select_slider("Оценка",options=[1,2,3,4,5],value=int(old.get("match_rating") or 3),format_func=star_rating,key=f"mr_{match['id']}_{p['id']}")
+            values[p["id"]]=(goals,rating)
+        save_stats=st.form_submit_button("Запази оценки и голмайстори",use_container_width=True)
+    if save_stats:
+        for pid,(goals,rating) in values.items(): execute("""INSERT INTO match_player_stats(academy_id,event_id,player_id,goals,match_rating,updated_by) VALUES(%s,%s,%s,%s,%s,%s) ON CONFLICT(event_id,player_id) DO UPDATE SET goals=EXCLUDED.goals,match_rating=EXCLUDED.match_rating,updated_by=EXCLUDED.updated_by,updated_at=NOW()""",(ACADEMY_ID,match["id"],pid,goals,rating,user["id"]))
+        st.success("Оценките са запазени и ще участват в обобщената статистика."); st.rerun()
+    report=fetchone("SELECT * FROM match_reports WHERE academy_id=%s AND event_id=%s",(ACADEMY_ID,match["id"])) or {}
+    st.markdown("### 🏆 Резултат")
+    with st.form(f"match_result_{match['id']}"):
+        opponent=st.text_input("Съперник",value=report.get("opponent_name") or match.get("opponent") or "Друг отбор")
+        x,y=st.columns(2); home=x.number_input("The Lions / Лъвчетата",0,99,int(report.get("home_score") or 0)); away=y.number_input(opponent,0,99,int(report.get("away_score") or 0))
+        standings=st.text_input("Линк към актуално класиране",value=report.get("standings_url") or "",placeholder="https://...")
+        confirm=st.form_submit_button("Потвърди резултата",use_container_width=True,type="primary")
+    if confirm:
+        execute("""INSERT INTO match_reports(academy_id,event_id,team_id,opponent_name,home_score,away_score,standings_url,confirmed,confirmed_by,confirmed_at) VALUES(%s,%s,%s,%s,%s,%s,%s,TRUE,%s,NOW()) ON CONFLICT(event_id) DO UPDATE SET opponent_name=EXCLUDED.opponent_name,home_score=EXCLUDED.home_score,away_score=EXCLUDED.away_score,standings_url=EXCLUDED.standings_url,confirmed=TRUE,confirmed_by=EXCLUDED.confirmed_by,confirmed_at=NOW(),updated_at=NOW()""",(ACADEMY_ID,match["id"],team["id"],opponent,home,away,standings.strip() or None,user["id"]))
+        notify_team_parents(team["id"],"match_result","Публикуван е резултат",f"The Lions {home}:{away} {opponent}"); st.success("Резултатът е публикуван."); st.rerun()
+
+def results_statistics_panel(team):
+    rows=fetchall("""SELECT mr.*,e.title,e.starts_at FROM match_reports mr JOIN events e ON e.id=mr.event_id WHERE mr.academy_id=%s AND mr.team_id=%s AND mr.confirmed ORDER BY e.starts_at DESC""",(ACADEMY_ID,team["id"]))
+    if not rows: st.info("Няма потвърдени резултати."); return
+    wins=sum(1 for r in rows if r["home_score"]>r["away_score"]); draws=sum(1 for r in rows if r["home_score"]==r["away_score"]); losses=len(rows)-wins-draws
+    a,b,c,d=st.columns(4); a.metric("Мачове",len(rows)); b.metric("Победи",wins); c.metric("Равни",draws); d.metric("Загуби",losses)
+    for r in rows:
+        status="Победа" if r["home_score"]>r["away_score"] else "Равен мач" if r["home_score"]==r["away_score"] else "Загуба"
+        with st.expander(f"{r['starts_at']:%d.%m.%Y} · The Lions {r['home_score']} : {r['away_score']} {r['opponent_name']} · {status}"):
+            scorers=fetchall("""SELECT p.first_name,p.last_name,mps.goals,mps.match_rating FROM match_player_stats mps JOIN players p ON p.id=mps.player_id WHERE mps.academy_id=%s AND mps.event_id=%s AND (mps.goals>0 OR mps.match_rating IS NOT NULL) ORDER BY mps.goals DESC""",(ACADEMY_ID,r["event_id"]))
+            for sp in scorers: st.write(f"⚽ {sp['first_name']} {sp['last_name']} · голове: {sp['goals']} · оценка: {star_rating(sp['match_rating'] or 3)}")
+            if r.get("standings_url"): st.link_button("🔗 Актуално класиране",r["standings_url"])
 def parent_panel(user):
     parent_nav(); players=parent_players(user)
     if not players: st.info("Няма добавени деца към профила."); return
@@ -1227,14 +1350,14 @@ def parent_panel(user):
     elif page=="Такси":
         rows=fetchall("SELECT * FROM player_fees WHERE academy_id=%s AND player_id=%s ORDER BY fee_year DESC,fee_month DESC",(ACADEMY_ID,child["id"]))
         for r in rows:
-            paid=r["status"]=="paid"; icon="🟢" if paid else "🔴"; label="ПЛАТЕНА" if paid else "ДЪЛЖИМА"
+            paid=r["status"]=="paid"; pending=r.get("confirmation_status")=="pending"; icon="🟢" if paid else "🟠" if pending else "🔴"; label="ПЛАТЕНА" if paid else "ЧАКА ПОТВЪРЖДЕНИЕ" if pending else "ДЪЛЖИМА"
             with st.expander(f"{icon} {r['fee_month']:02d}.{r['fee_year']} · {r['final_amount']:.2f} EUR · {label}"):
                 st.write(f"**{icon} {label}**")
                 if not paid:
                     method=st.radio("Начин на плащане",["cash","bank","card"],format_func=lambda x:{"cash":"В брой","bank":"По банка","card":"С карта"}[x],horizontal=True,key=f"choice_{r['id']}")
                     if method=="bank":
                         d=st.date_input("Дата на превода",date.today(),key=f"bd_{r['id']}")
-                        if st.button("Изпрати информацията",key=f"bs_{r['id']}",use_container_width=True):execute("UPDATE player_fees SET payment_method='bank',bank_transfer_date=%s,payment_note='Заявено от родител' WHERE id=%s",(d,r["id"]));notify_admins("bank_payment","Заявен банков превод",f"{child['first_name']} {child['last_name']} · {d:%d.%m.%Y}");st.success("Изпратено. Администраторът трябва да потвърди плащането.")
+                        if st.button("Изпрати информацията",key=f"bs_{r['id']}",use_container_width=True):execute("UPDATE player_fees SET payment_method='bank',bank_transfer_date=%s,payment_note='Заявено от родител',confirmation_status='pending',parent_reported_at=NOW() WHERE id=%s",(d,r["id"]));notify_admins("bank_payment","Заявен банков превод",f"{child['first_name']} {child['last_name']} · {d:%d.%m.%Y}");st.success("Изпратено. Администраторът трябва да потвърди плащането.")
                     elif method=="cash":st.info("Плащането в брой се потвърждава от треньор или администратор.")
                     else:st.info("Плащането с карта предстои.")
         if not rows:st.info("Няма начислени такси.")
@@ -1727,12 +1850,13 @@ def coach_panel(user):
         events=fetchone("SELECT COUNT(*) c FROM events WHERE academy_id=%s AND team_id=%s AND starts_at>=NOW()",(ACADEMY_ID,team["id"]))["c"]
         c1,c2=st.columns(2); c1.metric("Деца в групата",len(players)); c2.metric("Предстоящи събития",events)
         st.divider(); st.subheader("⚽ Играч")
-        for player in players: st.write(f"🟢 **{player['first_name']} {player['last_name']}**")
+        for player in players:
+            with st.container(border=True): player_card(player,position_edit=True,key_prefix=f"coach_{team['id']}")
         if not players: st.info("Няма потвърдени деца в този набор.")
     elif sec == "Тренировки и мачове":
         multi_date_event_form("coach_event_form", teams, user["id"], fixed_team_id=team["id"])
     elif sec == "Група за мача":
-        squad_section=st.radio("Избор",["⚽ Група за мача","📊 Статистика"],horizontal=True,key=f"coach_squad_inner_{team['id']}",label_visibility="collapsed")
+        squad_section=st.radio("Избор",["⚽ Група за мача","🧩 Match Day","📊 Статистика","🏆 Резултати"],horizontal=True,key=f"coach_squad_inner_{team['id']}",label_visibility="collapsed")
         if squad_section == "⚽ Група за мача":
             matches = fetchall(
                 "SELECT * FROM events WHERE academy_id=%s AND team_id=%s AND event_type='match' ORDER BY starts_at ASC",
