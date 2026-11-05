@@ -359,6 +359,16 @@ def init_db():
             event_id BIGINT NOT NULL REFERENCES events(id) ON DELETE CASCADE, player_id BIGINT NOT NULL REFERENCES players(id) ON DELETE CASCADE,
             goals INTEGER NOT NULL DEFAULT 0 CHECK(goals>=0), match_rating INTEGER CHECK(match_rating BETWEEN 1 AND 5), note TEXT,
             updated_by BIGINT REFERENCES users(id) ON DELETE SET NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), UNIQUE(event_id,player_id))""",
+        """CREATE TABLE IF NOT EXISTS event_attachments(
+            id BIGSERIAL PRIMARY KEY,
+            academy_id BIGINT NOT NULL REFERENCES academies(id) ON DELETE CASCADE,
+            event_id BIGINT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+            file_name TEXT NOT NULL,
+            file_mime TEXT,
+            file_data BYTEA NOT NULL,
+            uploaded_by BIGINT REFERENCES users(id) ON DELETE SET NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""",
+        """CREATE INDEX IF NOT EXISTS idx_event_attachments_event ON event_attachments(academy_id,event_id,created_at DESC)""",
         """ALTER TABLE player_evaluations ADD COLUMN IF NOT EXISTS match_bonus NUMERIC(4,2) NOT NULL DEFAULT 0""",
         """CREATE INDEX IF NOT EXISTS idx_fees_player ON player_fees(academy_id,player_id,fee_year,fee_month)""",
     ]
@@ -1379,6 +1389,18 @@ def match_day_panel(user,team):
     match_map={f"{m['starts_at']:%d.%m.%Y %H:%M} · {m['title']}":m for m in matches}
     match_label=st.selectbox("Избери мач",list(match_map),key=f"matchday_match_{team['id']}")
     match=match_map[match_label]
+    match_attachments=fetchall(
+        "SELECT * FROM event_attachments WHERE academy_id=%s AND event_id=%s ORDER BY created_at DESC",
+        (ACADEMY_ID,match["id"]),
+    )
+    if match_attachments:
+        with st.expander("📎 Файлове към мача",expanded=False):
+            for attachment in match_attachments:
+                st.download_button(
+                    attachment["file_name"],bytes(attachment["file_data"]),attachment["file_name"],
+                    attachment.get("file_mime") or "application/octet-stream",
+                    key=f"coach_match_attachment_{match['id']}_{attachment['id']}",
+                )
     squad=fetchall(
         """SELECT p.* FROM match_squads ms JOIN players p ON p.id=ms.player_id
            WHERE ms.academy_id=%s AND ms.event_id=%s AND ms.squad_status='in_group'
@@ -1522,49 +1544,51 @@ def match_day_panel(user,team):
             st.rerun()
 
 
-def results_statistics_panel(team):
-    st.markdown("## 🏆 Резултати и голмайстори")
-    st.markdown("### ⚙️ Настройка на класирането")
-    standings_url=st.text_input(
-        "Линк към актуалното класиране",value=team.get("standings_url") or "",
-        placeholder="Напр. страница на БФС или друг сайт",key=f"standings_url_{team['id']}",
-    )
-    save_col,open_col=st.columns(2)
-    if save_col.button("💾 Запази линка",key=f"save_standings_{team['id']}",use_container_width=True):
-        execute("UPDATE teams SET standings_url=%s WHERE academy_id=%s AND id=%s",(standings_url.strip() or None,ACADEMY_ID,team["id"]))
-        set_flash("✅ Линкът към класирането е запазен."); st.rerun()
-    if standings_url.strip(): open_col.link_button("🔗 Отвори класирането",standings_url.strip(),use_container_width=True)
-    else: open_col.info("Няма добавен линк.")
-    years = fetchall(
-        """SELECT DISTINCT date_part('year', e.starts_at)::int AS year
-           FROM match_reports mr
-           JOIN events e ON e.id=mr.event_id
-           WHERE mr.academy_id=%s
-             AND mr.team_id=%s
-             AND mr.confirmed
-           ORDER BY year DESC""",
-        (ACADEMY_ID, team["id"]),
-    )
-    if not years: st.info("Няма потвърдени резултати."); return
-    selected_year=st.selectbox("Архив по година",[r["year"] for r in years],key=f"results_year_{team['id']}")
-    rows=fetchall("""SELECT mr.*,e.title,e.starts_at FROM match_reports mr JOIN events e ON e.id=mr.event_id WHERE mr.academy_id=%s AND mr.team_id=%s AND mr.confirmed AND date_part('year', e.starts_at)::int=%s ORDER BY e.starts_at DESC""",(ACADEMY_ID,team["id"],selected_year))
-    wins=sum(1 for r in rows if r["home_score"]>r["away_score"]);draws=sum(1 for r in rows if r["home_score"]==r["away_score"]);losses=len(rows)-wins-draws
-    for col,label,value in zip(st.columns(4),["Мачове","Победи","Равни","Загуби"],[len(rows),wins,draws,losses]): col.metric(label,value)
-    result_tab,scorer_tab=st.tabs(["📅 Архив на мачовете","⚽ Голмайстори"])
-    with result_tab:
-        for row in rows:
-            status="Победа" if row["home_score"]>row["away_score"] else "Равен мач" if row["home_score"]==row["away_score"] else "Загуба"
+def render_results_dashboard(team, editable=False, key_prefix="results"):
+    st.markdown(f"## 🏆 {team['name']} · Резултати и класиране")
+    standings_url=team.get("standings_url") or ""
+    top_link_col, _ = st.columns([1.2,2.8])
+    with top_link_col:
+        if standings_url:
+            st.link_button("🏆 Официално класиране",standings_url,use_container_width=True)
+        else:
+            st.caption("Няма добавен линк към класиране.")
+    if editable:
+        with st.expander("⚙️ Класиране",expanded=False):
+            new_url=st.text_input("Линк към актуалното класиране",value=standings_url,placeholder="Напр. страница на БФС",key=f"{key_prefix}_standings_{team['id']}")
+            a,b=st.columns(2)
+            if a.button("💾 Запази",key=f"{key_prefix}_save_standings_{team['id']}",use_container_width=True):
+                execute("UPDATE teams SET standings_url=%s WHERE academy_id=%s AND id=%s",(new_url.strip() or None,ACADEMY_ID,team["id"]))
+                set_flash("✅ Линкът към класирането е запазен.");st.rerun()
+            if new_url.strip(): b.link_button("🔗 Отвори",new_url.strip(),use_container_width=True)
+    years=fetchall("""SELECT DISTINCT date_part('year',e.starts_at)::int year FROM match_reports mr JOIN events e ON e.id=mr.event_id WHERE mr.academy_id=%s AND mr.team_id=%s AND mr.confirmed ORDER BY year DESC""",(ACADEMY_ID,team["id"]))
+    if not years:
+        st.info("Няма потвърдени резултати.")
+        return
+    selected_year=st.selectbox("Година",[r["year"] for r in years],key=f"{key_prefix}_year_{team['id']}")
+    rows=fetchall("""SELECT mr.*,e.title,e.starts_at FROM match_reports mr JOIN events e ON e.id=mr.event_id WHERE mr.academy_id=%s AND mr.team_id=%s AND mr.confirmed AND date_part('year',e.starts_at)::int=%s ORDER BY e.starts_at DESC""",(ACADEMY_ID,team["id"],selected_year))
+    wins=sum(r["home_score"]>r["away_score"] for r in rows);draws=sum(r["home_score"]==r["away_score"] for r in rows);losses=len(rows)-wins-draws
+    for col,label,val in zip(st.columns(4),["Мачове","Победи","Равни","Загуби"],[len(rows),wins,draws,losses]):col.metric(label,val)
+    matches_tab,scorers_tab=st.tabs(["📅 Резултати","⚽ Голмайстори"])
+    with matches_tab:
+        for r in rows:
+            status="Победа" if r["home_score"]>r["away_score"] else "Равен мач" if r["home_score"]==r["away_score"] else "Загуба"
             icon="🟢" if status=="Победа" else "🔵" if status=="Равен мач" else "🔴"
             with st.container(border=True):
-                st.markdown(f"### {icon} The Lions {row['home_score']} : {row['away_score']} {row['opponent_name']}")
-                st.caption(f"{row['starts_at']:%d.%m.%Y %H:%M} · {row['title']} · {status}")
-                scorers=fetchall("""SELECT p.first_name,p.last_name,mps.goals FROM match_player_stats mps JOIN players p ON p.id=mps.player_id WHERE mps.academy_id=%s AND mps.event_id=%s AND mps.goals>0 ORDER BY mps.goals DESC""",(ACADEMY_ID,row["event_id"]))
-                if scorers: st.write("⚽ Голмайстори: "+", ".join(f"{x['first_name']} {x['last_name']} ({x['goals']})" for x in scorers))
-    with scorer_tab:
-        scorers=fetchall("""SELECT p.id,p.first_name,p.last_name,COALESCE(SUM(mps.goals),0)::int goals FROM match_player_stats mps JOIN players p ON p.id=mps.player_id JOIN events e ON e.id=mps.event_id WHERE mps.academy_id=%s AND p.team_id=%s AND date_part('year', e.starts_at)=%s GROUP BY p.id,p.first_name,p.last_name HAVING SUM(mps.goals)>0 ORDER BY goals DESC,p.first_name""",(ACADEMY_ID,team["id"],selected_year))
-        if not scorers: st.info("Няма записани голмайстори за избраната година.")
-        for index,player in enumerate(scorers,1):
-            st.markdown(f"### {index}. {player['first_name']} {player['last_name']} · ⚽ {player['goals']}")
+                st.markdown(f"### {icon} The Lions {r['home_score']} : {r['away_score']} {r['opponent_name']}")
+                st.caption(f"{r['starts_at']:%d.%m.%Y %H:%M} · {r['title']} · {status}")
+                scorers=fetchall("SELECT p.first_name,p.last_name,mps.goals FROM match_player_stats mps JOIN players p ON p.id=mps.player_id WHERE mps.academy_id=%s AND mps.event_id=%s AND mps.goals>0 ORDER BY mps.goals DESC",(ACADEMY_ID,r["event_id"]))
+                if scorers:st.write("⚽ Голмайстори: "+", ".join(f"{x['first_name']} {x['last_name']} ({x['goals']})" for x in scorers))
+    with scorers_tab:
+        scorers=fetchall("""SELECT p.id,p.first_name,p.last_name,COALESCE(SUM(mps.goals),0)::int goals FROM match_player_stats mps JOIN players p ON p.id=mps.player_id JOIN events e ON e.id=mps.event_id WHERE mps.academy_id=%s AND p.team_id=%s AND date_part('year',e.starts_at)::int=%s GROUP BY p.id,p.first_name,p.last_name HAVING SUM(mps.goals)>0 ORDER BY goals DESC,p.first_name""",(ACADEMY_ID,team["id"],selected_year))
+        if not scorers:st.info("Няма записани голмайстори за избраната година.")
+        medals=["🥇","🥈","🥉"]
+        for i,player in enumerate(scorers,1):
+            prefix=medals[i-1] if i<=3 else f"{i}."
+            st.markdown(f"### {prefix} {player['first_name']} {player['last_name']} · ⚽ {player['goals']}")
+
+def results_statistics_panel(team):
+    render_results_dashboard(team,editable=True,key_prefix="coach_results")
 
 def parent_panel(user):
     parent_nav(); show_flash(); players=parent_players(user)
@@ -1672,6 +1696,19 @@ def parent_panel(user):
                         unsafe_allow_html=True,
                     )
                     if r.get("description"): st.info(f"ℹ️ {r['description']}")
+                    attachments=fetchall(
+                        "SELECT * FROM event_attachments WHERE academy_id=%s AND event_id=%s ORDER BY created_at DESC",
+                        (ACADEMY_ID,r["id"]),
+                    )
+                    for attachment in attachments:
+                        st.download_button(
+                            f"📎 {attachment['file_name']}",
+                            data=bytes(attachment["file_data"]),
+                            file_name=attachment["file_name"],
+                            mime=attachment.get("file_mime") or "application/octet-stream",
+                            key=f"parent_match_attachment_{r['id']}_{attachment['id']}",
+                            use_container_width=False,
+                        )
                     squad=fetchone(
                         "SELECT squad_status FROM match_squads WHERE academy_id=%s AND event_id=%s AND player_id=%s",
                         (ACADEMY_ID,r["id"],child["id"]),
@@ -1687,49 +1724,12 @@ def parent_panel(user):
                     if poll and squad and squad["squad_status"] == "in_group": render_poll(poll,user,child)
             if not rows: st.info("Няма предстоящи мачове.")
         else:
-            team_info=fetchone(
-                "SELECT standings_url FROM teams WHERE academy_id=%s AND id=%s",
-                (ACADEMY_ID,child.get("team_id")),
-            ) if child.get("team_id") else None
-            st.markdown("## 🏆 Класиране и резултати")
-            if team_info and team_info.get("standings_url"):
-                st.link_button("🔗 Отвори актуалното класиране",team_info["standings_url"],use_container_width=True)
+            if child.get("team_id"):
+                parent_team=fetchone("SELECT * FROM teams WHERE academy_id=%s AND id=%s",(ACADEMY_ID,child["team_id"]))
+                if parent_team: render_results_dashboard(parent_team,editable=False,key_prefix=f"parent_results_{child['id']}")
+                else: st.info("Няма данни за набора.")
             else:
-                st.info("Все още няма добавен линк към класирането.")
-            result_years = fetchall(
-                """SELECT DISTINCT date_part('year', e.starts_at)::int AS year
-                   FROM match_reports mr
-                   JOIN events e ON e.id=mr.event_id
-                   WHERE mr.academy_id=%s
-                     AND mr.team_id=%s
-                     AND mr.confirmed
-                   ORDER BY year DESC""",
-                (ACADEMY_ID, child.get("team_id")),
-            ) if child.get("team_id") else []
-            selected_result_year=st.selectbox("Година",[r["year"] for r in result_years],key=f"parent_results_year_{child['id']}") if result_years else None
-            results=fetchall(
-                """SELECT mr.*,e.title,e.starts_at,e.location FROM match_reports mr
-                   JOIN events e ON e.id=mr.event_id
-                   WHERE mr.academy_id=%s AND mr.team_id=%s AND mr.confirmed AND date_part('year', e.starts_at)::int=%s
-                   ORDER BY e.starts_at DESC""",
-                (ACADEMY_ID,child.get("team_id"),selected_result_year),
-            ) if child.get("team_id") and selected_result_year else []
-            if results:
-                wins=sum(1 for r in results if r["home_score"]>r["away_score"])
-                draws=sum(1 for r in results if r["home_score"]==r["away_score"])
-                losses=len(results)-wins-draws
-                for col,label,value in zip(st.columns(4),["Мачове","Победи","Равни","Загуби"],[len(results),wins,draws,losses]): col.metric(label,value)
-                st.markdown("### Последни резултати")
-                for r in results:
-                    status="Победа" if r["home_score"]>r["away_score"] else "Равен мач" if r["home_score"]==r["away_score"] else "Загуба"
-                    icon="🟢" if status=="Победа" else "🔵" if status=="Равен мач" else "🔴"
-                    with st.container(border=True):
-                        st.markdown(f"### {icon} The Lions {r['home_score']} : {r['away_score']} {r['opponent_name']}")
-                        st.caption(f"{r['starts_at']:%d.%m.%Y %H:%M} · {r['title']} · {status}")
-                        scorers=fetchall("""SELECT p.first_name,p.last_name,mps.goals FROM match_player_stats mps JOIN players p ON p.id=mps.player_id WHERE mps.academy_id=%s AND mps.event_id=%s AND mps.goals>0 ORDER BY mps.goals DESC""",(ACADEMY_ID,r["event_id"]))
-                        if scorers: st.write("⚽ Голмайстори: "+", ".join(f"{x['first_name']} {x['last_name']} ({x['goals']})" for x in scorers))
-            else:
-                st.info("Все още няма потвърдени резултати от изминали мачове.")
+                st.info("Детето още не е свързано с набор.")
     elif page=="Съобщения":
         rows=fetchall("SELECT * FROM team_messages WHERE academy_id=%s AND team_id=%s ORDER BY created_at DESC",(ACADEMY_ID,child.get("team_id"))) if child.get("team_id") else []
         for r in rows:
@@ -1999,6 +1999,12 @@ def multi_date_event_form(form_key, teams, user_id, fixed_team_id=None):
             event_time = st.time_input("Час", key=f"{form_key}_match_time")
             location = st.text_input("Място", key=f"{form_key}_match_location")
             description = st.text_area("Допълнителна информация", key=f"{form_key}_match_description")
+            match_file = st.file_uploader(
+                "📎 Добави файл към мача (по желание)",
+                type=["pdf","jpg","jpeg","png","webp","doc","docx","xls","xlsx"],
+                key=f"{form_key}_match_file",
+                help="Например програма, схема, покана, регламент или снимка. Максимум 8 MB.",
+            )
             save_match = st.form_submit_button("⚽ Създай мача", use_container_width=True, type="primary")
 
         if save_match:
@@ -2007,11 +2013,12 @@ def multi_date_event_form(form_key, teams, user_id, fixed_team_id=None):
             elif not opponent.strip():
                 st.error("Въведи името на противника.")
             else:
-                execute(
+                created_match = execute(
                     """INSERT INTO events(
                            academy_id,team_id,event_type,title,opponent,starts_at,
                            location,description,created_by)
-                       VALUES(%s,%s,'match',%s,%s,%s,%s,%s,%s)""",
+                       VALUES(%s,%s,'match',%s,%s,%s,%s,%s,%s)
+                       RETURNING id""",
                     (
                         ACADEMY_ID,
                         team_id,
@@ -2022,7 +2029,19 @@ def multi_date_event_form(form_key, teams, user_id, fixed_team_id=None):
                         description.strip() or None,
                         user_id,
                     ),
+                    True,
                 )
+                if match_file:
+                    file_bytes = match_file.getvalue()
+                    if len(file_bytes) > 8 * 1024 * 1024:
+                        st.warning("Мачът е създаден, но файлът не е качен, защото е по-голям от 8 MB.")
+                    else:
+                        execute(
+                            """INSERT INTO event_attachments(
+                                   academy_id,event_id,file_name,file_mime,file_data,uploaded_by)
+                               VALUES(%s,%s,%s,%s,%s,%s)""",
+                            (ACADEMY_ID,created_match["id"],match_file.name,match_file.type,file_bytes,user_id),
+                        )
                 notify_team_parents(
                     team_id,
                     "match",
@@ -2090,7 +2109,7 @@ def admin_panel(user):
             if admin_teams:
                 admin_team_map={t["name"]:t for t in admin_teams}
                 admin_team_name=st.selectbox("Избери набор за резултати",list(admin_team_map),key="admin_results_team")
-                results_statistics_panel(admin_team_map[admin_team_name])
+                render_results_dashboard(admin_team_map[admin_team_name],editable=False,key_prefix="admin_results")
             else:
                 st.info("Няма активни набори.")
 
