@@ -693,7 +693,18 @@ def apply_style():
         }}
 
         .st-key-parent_nav {{
-            margin-top: 72px !important;
+            margin-top: 56px !important;
+            max-width: 820px !important;
+            margin-left: auto !important;
+            margin-right: auto !important;
+        }}
+        .st-key-parent_nav div[data-testid="stHorizontalBlock"] {{
+            gap: 6px !important;
+        }}
+        .st-key-parent_nav div[data-testid="stButton"] > button {{
+            min-height: 40px !important;
+            padding: 6px 10px !important;
+            font-size: 0.76rem !important;
         }}
         
         [data-testid="stSidebar"] [data-testid="stRadio"] {{
@@ -746,7 +757,7 @@ def current_user():
         """SELECT ls.user_id,u.* FROM login_sessions ls
            JOIN users u ON u.id=ls.user_id
            WHERE ls.academy_id=%s AND ls.token_hash=%s
-             AND ls.last_seen >= NOW() - INTERVAL '5 minutes'
+             AND ls.last_seen >= NOW() - INTERVAL '7 days'
              AND u.active AND u.account_status='approved'""",
         (ACADEMY_ID, session_token_hash(token)),
     )
@@ -1353,11 +1364,17 @@ def player_card(player,position_edit=False,key_prefix="player"):
 
 def match_day_panel(user,team):
     matches=fetchall(
-        "SELECT * FROM events WHERE academy_id=%s AND team_id=%s AND event_type='match' ORDER BY starts_at DESC",
+        """SELECT e.* FROM events e
+           WHERE e.academy_id=%s AND e.team_id=%s AND e.event_type='match'
+             AND NOT EXISTS(
+                 SELECT 1 FROM match_reports mr
+                 WHERE mr.academy_id=e.academy_id AND mr.event_id=e.id AND mr.confirmed
+             )
+           ORDER BY e.starts_at ASC""",
         (ACADEMY_ID,team["id"]),
     )
     if not matches:
-        st.info("Няма публикувани мачове за този набор.")
+        st.info("Няма активни мачове за този набор. Приключените срещи са в „Резултати“.")
         return
     match_map={f"{m['starts_at']:%d.%m.%Y %H:%M} · {m['title']}":m for m in matches}
     match_label=st.selectbox("Избери мач",list(match_map),key=f"matchday_match_{team['id']}")
@@ -1372,50 +1389,45 @@ def match_day_panel(user,team):
         st.warning("Първо избери и изпрати групата за този мач.")
         return
     st.markdown("## 🧩 Match Day")
-    st.caption("Кратък отзив от треньора за избраните деца. Оценките не се показват тук като статистика, но участват в общото развитие на детето.")
+    st.caption("За приключване на мача е задължителен само резултатът. Отзивите и оценките за футболистите са по желание.")
     old_stats={r["player_id"]:r for r in fetchall(
         "SELECT * FROM match_player_stats WHERE academy_id=%s AND event_id=%s",
         (ACADEMY_ID,match["id"]),
     )}
-    with st.form(f"matchday_feedback_{match['id']}"):
-        feedback={}
-        for player in squad:
-            old=old_stats.get(player["id"],{})
-            with st.container(border=True):
-                photo_col,info_col,rating_col=st.columns([1,5,2])
-                with photo_col:
-                    st.markdown(avatar_html(player.get("profile_image"),player.get("profile_image_mime"),58),unsafe_allow_html=True)
-                with info_col:
-                    st.write(f"**{player['first_name']} {player['last_name']}**")
-                    note=st.text_input(
-                        "Кратък отзив",
-                        value=old.get("note") or "",
-                        key=f"match_note_{match['id']}_{player['id']}",
-                        placeholder="Напр. силен мач, добра дисциплина...",
-                        label_visibility="collapsed",
-                    )
-                with rating_col:
-                    rating=st.select_slider(
-                        "Оценка",
-                        options=[1,2,3,4,5],
-                        value=int(old.get("match_rating") or 3),
-                        format_func=star_rating,
-                        key=f"match_rating_{match['id']}_{player['id']}",
-                    )
-                feedback[player["id"]]=(rating,note)
-        save_feedback=st.form_submit_button("💾 Запази отзивите",use_container_width=True)
-    if save_feedback:
-        for player_id,(rating,note) in feedback.items():
-            execute(
-                """INSERT INTO match_player_stats(academy_id,event_id,player_id,goals,match_rating,note,updated_by)
-                   VALUES(%s,%s,%s,0,%s,%s,%s)
-                   ON CONFLICT(event_id,player_id) DO UPDATE SET
-                     match_rating=EXCLUDED.match_rating,note=EXCLUDED.note,
-                     updated_by=EXCLUDED.updated_by,updated_at=NOW()""",
-                (ACADEMY_ID,match["id"],player_id,rating,note.strip() or None,user["id"]),
-            )
-        set_flash("✅ Отзивите са запазени и участват в общата статистика на децата.")
-        st.rerun()
+    with st.expander("⭐ Добави отзиви и оценки по желание",expanded=False):
+        selected_player_names=st.multiselect(
+            "Избери само футболистите, които искаш да оцениш",
+            [f"{p['first_name']} {p['last_name']}" for p in squad],
+            key=f"optional_feedback_players_{match['id']}",
+        )
+        player_by_name={f"{p['first_name']} {p['last_name']}":p for p in squad}
+        if selected_player_names:
+            with st.form(f"matchday_optional_feedback_{match['id']}"):
+                feedback={}
+                for player_name in selected_player_names:
+                    player=player_by_name[player_name];old=old_stats.get(player["id"],{})
+                    with st.container(border=True):
+                        photo_col,info_col,rating_col=st.columns([1,5,2])
+                        with photo_col:
+                            st.markdown(avatar_html(player.get("profile_image"),player.get("profile_image_mime"),54),unsafe_allow_html=True)
+                        with info_col:
+                            st.write(f"**{player_name}**")
+                            note=st.text_input("Кратък отзив",value=old.get("note") or "",key=f"match_note_{match['id']}_{player['id']}",placeholder="По желание",label_visibility="collapsed")
+                        with rating_col:
+                            rating=st.select_slider("Оценка",options=[1,2,3,4,5],value=int(old.get("match_rating") or 3),format_func=star_rating,key=f"match_rating_{match['id']}_{player['id']}")
+                        feedback[player["id"]]=(rating,note)
+                save_feedback=st.form_submit_button("💾 Запази избраните отзиви",use_container_width=True)
+            if save_feedback:
+                for player_id,(rating,note) in feedback.items():
+                    execute("""INSERT INTO match_player_stats(academy_id,event_id,player_id,goals,match_rating,note,updated_by)
+                               VALUES(%s,%s,%s,0,%s,%s,%s)
+                               ON CONFLICT(event_id,player_id) DO UPDATE SET
+                                 match_rating=EXCLUDED.match_rating,note=EXCLUDED.note,
+                                 updated_by=EXCLUDED.updated_by,updated_at=NOW()""",
+                            (ACADEMY_ID,match["id"],player_id,rating,note.strip() or None,user["id"]))
+                set_flash("✅ Избраните отзиви са запазени и участват в статистиката на децата.");st.rerun()
+        else:
+            st.info("Няма избрани футболисти за оценяване. Можеш директно да въведеш резултата и да приключиш мача.")
     report=fetchone(
         "SELECT * FROM match_reports WHERE academy_id=%s AND event_id=%s",
         (ACADEMY_ID,match["id"]),
@@ -1475,7 +1487,7 @@ def match_day_panel(user,team):
                 f"Голове · {scorer_name}",1,20,1,
                 key=f"scorer_goals_{match['id']}_{scorer_map[scorer_name]['id']}",
             )
-        confirm=st.form_submit_button("✅ Потвърди резултата",use_container_width=True,type="primary")
+        confirm=st.form_submit_button("✅ Приключи мача и изпрати в архива",use_container_width=True,type="primary")
     if confirm:
         if not opponent.strip():
             st.error("Моля, въведи името на другия отбор.")
@@ -1506,7 +1518,7 @@ def match_day_panel(user,team):
             team["id"],"match_result","Публикуван е резултат",
             f"The Lions {home_score}:{away_score} {opponent.strip() or 'Друг отбор'}",
             )
-            st.success("Резултатът е записан и вече се вижда в „Резултати“.")
+            set_flash("✅ Мачът е приключен. Резултатът е преместен в архива и вече не се показва в „Група за мача“ и „Match Day“.")
             st.rerun()
 
 
@@ -1646,6 +1658,10 @@ def parent_panel(user):
             rows=fetchall(
                 """SELECT * FROM events WHERE academy_id=%s AND team_id=%s AND event_type='match'
                    AND starts_at >= NOW() AND status <> 'cancelled'
+                   AND NOT EXISTS(
+                       SELECT 1 FROM match_reports mr
+                       WHERE mr.academy_id=events.academy_id AND mr.event_id=events.id AND mr.confirmed
+                   )
                    ORDER BY starts_at ASC LIMIT 40""",
                 (ACADEMY_ID,child.get("team_id")),
             ) if child.get("team_id") else []
@@ -2064,6 +2080,19 @@ def admin_panel(user):
         ]
         for col, label, value in zip(st.columns(3), ["Чакащи родители", "Чакащи деца", "Активни набори"], vals):
             col.metric(label, value)
+        st.divider()
+        st.session_state.setdefault("admin_show_match_results",False)
+        if st.button("🏆 Резултати и статистика от мачовете",key="admin_toggle_match_results",use_container_width=False):
+            st.session_state.admin_show_match_results=not st.session_state.admin_show_match_results
+            st.rerun()
+        if st.session_state.admin_show_match_results:
+            admin_teams=fetchall("SELECT * FROM teams WHERE academy_id=%s AND active ORDER BY birth_year",(ACADEMY_ID,))
+            if admin_teams:
+                admin_team_map={t["name"]:t for t in admin_teams}
+                admin_team_name=st.selectbox("Избери набор за резултати",list(admin_team_map),key="admin_results_team")
+                results_statistics_panel(admin_team_map[admin_team_name])
+            else:
+                st.info("Няма активни набори.")
 
     elif sec == "Регистрации":
         pending, archive = st.tabs(["🔴 Очакващи", "🟢 Архив потвърдени"])
@@ -2405,11 +2434,17 @@ def coach_panel(user):
         squad_section=st.radio("Избор",["⚽ Група за мача","🧩 Match Day","📊 Статистика","🏆 Резултати"],horizontal=True,key=f"coach_squad_inner_{team['id']}",label_visibility="collapsed")
         if squad_section == "⚽ Група за мача":
             matches = fetchall(
-                "SELECT * FROM events WHERE academy_id=%s AND team_id=%s AND event_type='match' ORDER BY starts_at ASC",
+                """SELECT e.* FROM events e
+                   WHERE e.academy_id=%s AND e.team_id=%s AND e.event_type='match'
+                     AND NOT EXISTS(
+                         SELECT 1 FROM match_reports mr
+                         WHERE mr.academy_id=e.academy_id AND mr.event_id=e.id AND mr.confirmed
+                     )
+                   ORDER BY e.starts_at ASC""",
                 (ACADEMY_ID, team["id"]),
             )
             if not matches:
-                st.info("Няма публикувани мачове за този набор.")
+                st.info("Няма активни мачове за този набор. Приключените срещи са в „Резултати“.")
             else:
                 mmap = {f"{m['starts_at']:%d.%m.%Y %H:%M} · {m['title']}": m for m in matches}
                 match_label = st.selectbox("Избери мач", list(mmap), key="squad_match")
