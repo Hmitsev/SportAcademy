@@ -1401,11 +1401,19 @@ def match_day_panel(user,team):
     if match_attachments:
         with st.expander("📎 Файлове към мача",expanded=False):
             for attachment in match_attachments:
-                st.download_button(
-                    attachment["file_name"],bytes(attachment["file_data"]),attachment["file_name"],
-                    attachment.get("file_mime") or "application/octet-stream",
-                    key=f"coach_match_attachment_{match['id']}_{attachment['id']}",
-                )
+                mime=(attachment.get("file_mime") or "").lower()
+                if mime.startswith("image/"):
+                    st.image(
+                        bytes(attachment["file_data"]),
+                        caption=attachment["file_name"],
+                        use_container_width=True,
+                    )
+                else:
+                    st.download_button(
+                        attachment["file_name"],bytes(attachment["file_data"]),attachment["file_name"],
+                        attachment.get("file_mime") or "application/octet-stream",
+                        key=f"coach_match_attachment_{match['id']}_{attachment['id']}",
+                    )
     squad=fetchall(
         """SELECT p.* FROM match_squads ms JOIN players p ON p.id=ms.player_id
            WHERE ms.academy_id=%s AND ms.event_id=%s AND ms.squad_status='in_group'
@@ -1545,7 +1553,12 @@ def match_day_panel(user,team):
             team["id"],"match_result","Публикуван е резултат",
             f"The Lions {home_score}:{away_score} {opponent.strip() or 'Друг отбор'}",
             )
-            set_flash("✅ Мачът е приключен. Резултатът е преместен в архива и вече не се показва в „Група за мача“ и „Match Day“.")
+            # След приключване пазим резултата и статистиката, но освобождаваме тежкото файлово съдържание.
+            execute(
+                "DELETE FROM event_attachments WHERE academy_id=%s AND event_id=%s",
+                (ACADEMY_ID,match["id"]),
+            )
+            set_flash("✅ Мачът е приключен. Резултатът е в архива, а качените файлове/снимки са изтрити автоматично, за да не заемат място.")
             st.rerun()
 
 
@@ -1686,7 +1699,7 @@ def parent_panel(user):
         if match_view == "⚽ Предстоящи мачове":
             rows=fetchall(
                 """SELECT * FROM events WHERE academy_id=%s AND team_id=%s AND event_type='match'
-                   AND starts_at >= NOW() AND status <> 'cancelled'
+                   AND status <> 'cancelled'
                    AND NOT EXISTS(
                        SELECT 1 FROM match_reports mr
                        WHERE mr.academy_id=events.academy_id AND mr.event_id=events.id AND mr.confirmed
@@ -1697,7 +1710,7 @@ def parent_panel(user):
             for r in rows:
                 with st.container(border=True):
                     st.markdown(
-                        f"<div class='schedule-line' style='color:#ff2020!important;font-weight:900!important;font-size:1.12rem!important;text-shadow:0 0 2px #000,0 0 8px rgba(255,0,0,.50);'>{r['title']} · {r['starts_at']:%d.%m.%Y %H:%M} · {r.get('location') or 'Без място'}</div>",
+                        f"<div class='schedule-line' style='color:#ff2020!important;font-weight:900!important;font-size:1.12rem!important;text-shadow:0 0 2px #000,0 0 8px rgba(255,0,0,.50);'>⚽ {r['title']} · срещу {r.get('opponent') or 'Непосочен противник'} · {r['starts_at']:%d.%m.%Y %H:%M} · {r.get('location') or 'Без място'}</div>",
                         unsafe_allow_html=True,
                     )
                     if r.get("description"): st.info(f"ℹ️ {r['description']}")
@@ -1706,14 +1719,22 @@ def parent_panel(user):
                         (ACADEMY_ID,r["id"]),
                     )
                     for attachment in attachments:
-                        st.download_button(
-                            f"📎 {attachment['file_name']}",
-                            data=bytes(attachment["file_data"]),
-                            file_name=attachment["file_name"],
-                            mime=attachment.get("file_mime") or "application/octet-stream",
-                            key=f"parent_match_attachment_{r['id']}_{attachment['id']}",
-                            use_container_width=False,
-                        )
+                        mime=(attachment.get("file_mime") or "").lower()
+                        if mime.startswith("image/"):
+                            st.image(
+                                bytes(attachment["file_data"]),
+                                caption=attachment["file_name"],
+                                use_container_width=True,
+                            )
+                        else:
+                            st.download_button(
+                                f"📎 {attachment['file_name']}",
+                                data=bytes(attachment["file_data"]),
+                                file_name=attachment["file_name"],
+                                mime=attachment.get("file_mime") or "application/octet-stream",
+                                key=f"parent_match_attachment_{r['id']}_{attachment['id']}",
+                                use_container_width=False,
+                            )
                     squad=fetchone(
                         "SELECT squad_status FROM match_squads WHERE academy_id=%s AND event_id=%s AND player_id=%s",
                         (ACADEMY_ID,r["id"],child["id"]),
