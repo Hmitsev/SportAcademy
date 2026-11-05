@@ -37,30 +37,106 @@ def pool():
 
 @contextmanager
 def db():
-    conn = pool().getconn()
+    db_pool = pool()
+    conn = None
+    broken = False
+
     try:
+        conn = db_pool.getconn()
+
+        # Не използваме затворена PostgreSQL връзка.
+        if conn.closed:
+            broken = True
+            raise psycopg2.InterfaceError(
+                "Получена е затворена PostgreSQL връзка."
+            )
+
         yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
+
+        if not conn.closed:
+            conn.commit()
+
+    except (psycopg2.OperationalError, psycopg2.InterfaceError):
+        broken = True
+
+        if conn is not None and not conn.closed:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+
         raise
+
+    except Exception:
+        if conn is not None and not conn.closed:
+            try:
+                conn.rollback()
+            except Exception:
+                broken = True
+
+        raise
+
     finally:
-        pool().putconn(conn)
+        if conn is not None:
+            try:
+                db_pool.putconn(
+                    conn,
+                    close=broken or bool(conn.closed),
+                )
+            except Exception:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
 
 def fetchone(q, p=()):
-    with db() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(q, p)
-        return cur.fetchone()
+    for attempt in range(2):
+        try:
+            with db() as conn:
+                with conn.cursor(
+                    cursor_factory=RealDictCursor
+                ) as cur:
+                    cur.execute(q, p)
+                    return cur.fetchone()
+
+        except (
+            psycopg2.OperationalError,
+            psycopg2.InterfaceError,
+        ):
+            if attempt == 1:
+                raise
+
 
 def fetchall(q, p=()):
-    with db() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(q, p)
-        return cur.fetchall()
+    for attempt in range(2):
+        try:
+            with db() as conn:
+                with conn.cursor(
+                    cursor_factory=RealDictCursor
+                ) as cur:
+                    cur.execute(q, p)
+                    return cur.fetchall()
+
+        except (
+            psycopg2.OperationalError,
+            psycopg2.InterfaceError,
+        ):
+            if attempt == 1:
+                raise
+
 
 def execute(q, p=(), returning=False):
-    with db() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute(q, p)
-        return cur.fetchone() if returning else None
+    with db() as conn:
+        with conn.cursor(
+            cursor_factory=RealDictCursor
+        ) as cur:
+            cur.execute(q, p)
+
+            if returning:
+                return cur.fetchone()
+
+            return None
 
 def hash_password(value):
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
