@@ -801,32 +801,37 @@ def unread_notification_count(user_id):
 def notification_center(user):
     st.subheader("🔔 Известия")
     rows = fetchall(
-        "SELECT * FROM notifications WHERE academy_id=%s AND user_id=%s ORDER BY created_at DESC LIMIT 50",
+        "SELECT * FROM notifications WHERE academy_id=%s AND user_id=%s AND NOT is_read ORDER BY created_at DESC LIMIT 50",
         (ACADEMY_ID, user["id"]),
     )
     if not rows:
-        st.info("Няма известия.")
+        st.info("Няма нови известия.")
         return
-    if st.button("Маркирай всички като прочетени", key=f"read_all_{user['id']}"):
-        execute("UPDATE notifications SET is_read=TRUE WHERE academy_id=%s AND user_id=%s", (ACADEMY_ID, user["id"]))
+    if st.button("✅ Маркирай всички като прочетени", key=f"read_all_{user['id']}", use_container_width=True):
+        execute("DELETE FROM notifications WHERE academy_id=%s AND user_id=%s", (ACADEMY_ID, user["id"]))
+        set_flash("✅ Известията са прочетени и премахнати от камбанката.")
         st.rerun()
     for row in rows:
-        icon = "🔴" if not row["is_read"] else "⚪"
         with st.container(border=True):
-            st.write(f"{icon} **{row['title']}**")
+            st.write(f"🔴 **{row['title']}**")
             if row.get("body"): st.write(row["body"])
             st.caption(row["created_at"].strftime("%d.%m.%Y %H:%M"))
 
 
 def notify_team_parents(team_id, notification_type, title, body=""):
     parents = fetchall(
-        """SELECT DISTINCT pp.parent_user_id user_id FROM parent_players pp
-           JOIN players p ON p.id=pp.player_id
-           WHERE pp.academy_id=%s AND p.team_id=%s AND p.active""",
+        """SELECT DISTINCT u.id AS user_id
+           FROM users u
+           JOIN parent_players pp ON pp.parent_user_id=u.id AND pp.academy_id=u.academy_id
+           JOIN players p ON p.id=pp.player_id AND p.academy_id=pp.academy_id
+           WHERE u.academy_id=%s AND u.role='parent' AND u.active
+             AND u.account_status='approved' AND p.team_id=%s
+             AND p.active AND p.approval_status='approved'""",
         (ACADEMY_ID, team_id),
     )
     for parent in parents:
         create_notification(parent["user_id"], notification_type, title, body)
+    return len(parents)
 
 
 def notify_admins(notification_type, title, body=""):
@@ -2042,13 +2047,16 @@ def multi_date_event_form(form_key, teams, user_id, fixed_team_id=None):
                                VALUES(%s,%s,%s,%s,%s,%s)""",
                             (ACADEMY_ID,created_match["id"],match_file.name,match_file.type,file_bytes,user_id),
                         )
-                notify_team_parents(
+                notified_parents = notify_team_parents(
                     team_id,
                     "match",
-                    "Публикуван е нов мач",
-                    f"{title.strip()} · {event_date:%d.%m.%Y} {event_time:%H:%M}",
+                    "⚽ Публикуван е нов мач",
+                    f"{title.strip()} срещу {opponent.strip()} · {event_date:%d.%m.%Y} {event_time:%H:%M} · {location.strip() or 'Без посочено място'}",
                 )
-                set_flash("✅ Мачът е създаден и родителите са уведомени.")
+                if notified_parents:
+                    set_flash(f"✅ Мачът е създаден. Известие е изпратено до {notified_parents} родителски профила.")
+                else:
+                    set_flash("⚠️ Мачът е създаден, но няма активни одобрени родители, свързани с този набор.", "warning")
                 st.rerun()
 
 def coach_account_manager():
@@ -2480,6 +2488,14 @@ def coach_panel(user):
                     )
                 }
                 st.caption("Маркирай само футболистите, които са в групата за избрания мач.")
+                squad_sent_key=f"squad_sent_{match['id']}"
+                squad_is_sent=bool(st.session_state.get(squad_sent_key))
+                if squad_is_sent:
+                    st.markdown(f"""<style>
+                    .st-key-match_squad_{match['id']} button[kind="formSubmit"] {{
+                        background:linear-gradient(135deg,#11833b,#27b85b)!important;
+                        border-color:#69e698!important;color:#fff!important;
+                    }}</style>""",unsafe_allow_html=True)
                 with st.form(f"match_squad_{match['id']}"):
                     choices={}
                     st.markdown("#### Футболисти")
@@ -2490,7 +2506,10 @@ def coach_panel(user):
                         choices[player["id"]]=check_col.checkbox("В групата",value=current,key=f"squad_check_{match['id']}_{player['id']}",label_visibility="collapsed")
                     existing_poll=fetchone("SELECT id FROM polls WHERE academy_id=%s AND event_id=%s AND poll_type='match_attendance' AND active ORDER BY created_at DESC LIMIT 1",(ACADEMY_ID,match["id"]))
                     create_match_poll=st.checkbox("📊 Изпрати анкета до родителите на избраните деца",value=False,key=f"match_poll_{match['id']}")
-                    publish_squad=st.form_submit_button("Изпрати групата към родителите",use_container_width=True)
+                    publish_squad=st.form_submit_button(
+                        "✅ Групата е изпратена" if squad_is_sent else "Изпрати групата към родителите",
+                        use_container_width=True,
+                    )
                 if publish_squad:
                     with db() as conn, conn.cursor() as cur:
                         cur.execute("DELETE FROM match_squads WHERE academy_id=%s AND event_id=%s",(ACADEMY_ID,match["id"]))
@@ -2502,8 +2521,13 @@ def coach_panel(user):
                         if old_poll: execute("UPDATE polls SET active=TRUE,title=%s,question=%s,team_id=%s WHERE id=%s AND academy_id=%s",("Присъствие на мача",question,team["id"],old_poll["id"],ACADEMY_ID))
                         else: execute("INSERT INTO polls(academy_id,poll_type,title,question,team_id,event_id,created_by) VALUES(%s,'match_attendance',%s,%s,%s,%s,%s)",(ACADEMY_ID,"Присъствие на мача",question,team["id"],match["id"],user["id"]))
                     else: execute("UPDATE polls SET active=FALSE WHERE academy_id=%s AND event_id=%s AND poll_type='match_attendance'",(ACADEMY_ID,match["id"]))
-                    notify_team_parents(team["id"],"match_squad","Публикувана е група за мача",match_label)
-                    st.success("Групата за мача е изпратена към родителите."); st.rerun()
+                    notified_parents=notify_team_parents(team["id"],"match_squad","Публикувана е група за мача",match_label)
+                    st.session_state[squad_sent_key]=True
+                    if notified_parents:
+                        set_flash(f"✅ Групата за мача е изпратена до {notified_parents} родителски профила.")
+                    else:
+                        set_flash("⚠️ Групата е запазена, но няма активни одобрени родители за уведомяване.","warning")
+                    st.rerun()
         elif squad_section == "🧩 Match Day":
             match_day_panel(user,team)
         elif squad_section == "🏆 Резултати":
