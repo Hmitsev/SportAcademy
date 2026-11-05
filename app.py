@@ -340,6 +340,7 @@ def init_db():
         """ALTER TABLE teams ADD COLUMN IF NOT EXISTS standings_url TEXT""",
         """ALTER TABLE player_fees ADD COLUMN IF NOT EXISTS confirmation_status TEXT NOT NULL DEFAULT 'unreported'""",
         """ALTER TABLE player_fees ADD COLUMN IF NOT EXISTS parent_reported_at TIMESTAMPTZ""",
+        """ALTER TABLE player_fees ADD COLUMN IF NOT EXISTS payment_reported_date DATE""",
         """ALTER TABLE player_fees ADD COLUMN IF NOT EXISTS confirmed_by BIGINT REFERENCES users(id) ON DELETE SET NULL""",
         """CREATE TABLE IF NOT EXISTS match_reports(
             id BIGSERIAL PRIMARY KEY, academy_id BIGINT NOT NULL REFERENCES academies(id) ON DELETE CASCADE,
@@ -826,11 +827,12 @@ def hero():
 def public_home():
     hero()
     video_url = academy().get("parent_help_video_url")
-    with st.expander("▶️ Как се използва приложението от родители", expanded=False):
-        st.caption("Кратко видео за регистрация, вход и използване на родителския профил.")
-        if video_url: st.video(video_url)
-        else: st.info("Видео инструкцията все още не е добавена от администратора.")
-
+    help_col, _ = st.columns([1.2, 2.8])
+    with help_col:
+        with st.expander("▶️ Как се използва приложението", expanded=False):
+            st.caption("Кратко видео за родителския профил.")
+            if video_url: st.video(video_url)
+            else: st.info("Видео инструкцията все още не е добавена.")
 
 def parent_information(user=None):
     st.subheader("ℹ️ Информационен архив")
@@ -935,7 +937,7 @@ def render_poll(poll,user,child=None):
 
 def payment_rows(team_id=None):
     extra=" AND pf.team_id=%s" if team_id else ""; params=(ACADEMY_ID,team_id) if team_id else (ACADEMY_ID,)
-    return fetchall(f"""SELECT pf.id fee_id,t.name team_name,p.first_name,p.last_name,pf.fee_month,pf.fee_year,pf.final_amount,pf.status,pf.payment_method,pf.bank_transfer_date,pf.payment_note,pf.paid_at,pf.confirmation_status,pf.parent_reported_at FROM player_fees pf JOIN players p ON p.id=pf.player_id LEFT JOIN teams t ON t.id=pf.team_id WHERE pf.academy_id=%s {extra} ORDER BY t.birth_year,p.last_name,p.first_name,pf.fee_year DESC,pf.fee_month DESC""",params)
+    return fetchall(f"""SELECT pf.id fee_id,t.name team_name,p.first_name,p.last_name,pf.fee_month,pf.fee_year,pf.final_amount,pf.status,pf.payment_method,pf.bank_transfer_date,pf.payment_note,pf.paid_at,pf.confirmation_status,pf.parent_reported_at,pf.payment_reported_date FROM player_fees pf JOIN players p ON p.id=pf.player_id LEFT JOIN teams t ON t.id=pf.team_id WHERE pf.academy_id=%s {extra} ORDER BY t.birth_year,p.last_name,p.first_name,pf.fee_year DESC,pf.fee_month DESC""",params)
 
 def payment_excel(rows):
     names={"cash":"В брой","bank":"По банка","card":"Карта","other":"Друго"}; data=[]
@@ -978,48 +980,90 @@ def payment_excel(rows):
     
     return b.getvalue()
 
+def payment_method_label(method):
+    return {"cash":"В брой","bank":"По банка","card":"Карта","other":"Друго"}.get(method,method or "Не е посочен")
+
+
+def confirm_fee_payment(fee_id,user_id,method=None,payment_date=None):
+    execute(
+        """UPDATE player_fees SET status='paid',confirmation_status='confirmed',
+           confirmed_by=%s,paid_at=COALESCE(%s::date,CURRENT_DATE),
+           payment_method=COALESCE(%s,payment_method),
+           payment_reported_date=COALESCE(%s,payment_reported_date)
+           WHERE id=%s AND academy_id=%s AND status<>'paid'""",
+        (user_id,payment_date,method,payment_date,fee_id,ACADEMY_ID),
+    )
+
+
 def payment_panel(user,team_ids=None,fixed_team_id=None):
     teams=fetchall("SELECT * FROM teams WHERE academy_id=%s AND active ORDER BY birth_year",(ACADEMY_ID,))
     teams=[t for t in teams if team_ids is None or t["id"] in team_ids]
     if not teams: st.info("Няма набори."); return
     team_map={t["name"]:t for t in teams}
-    default_team=next((t for t in teams if t["id"]==fixed_team_id),teams[0])
-    team_name=st.selectbox("Набор",list(team_map),index=list(team_map).index(default_team["name"]),key=f"fee_team_{user['id']}")
-    team=team_map[team_name]
+    if fixed_team_id is not None:
+        team=next((t for t in teams if t["id"]==fixed_team_id),teams[0])
+        st.caption(f"Активен набор: {team['name']}")
+    else:
+        team_name=st.selectbox("Набор",list(team_map),key=f"fee_team_{user['id']}")
+        team=team_map[team_name]
     now=date.today(); c1,c2=st.columns(2)
     month=c1.selectbox("Месец",range(1,13),index=now.month-1,key=f"fee_month_{user['id']}_{team['id']}")
     year=int(c2.number_input("Година",2024,2045,now.year,key=f"fee_year_{user['id']}_{team['id']}"))
     rows=[r for r in payment_rows(team["id"]) if int(r["fee_month"])==month and int(r["fee_year"])==year]
     if not rows: st.info("Няма начислени такси за избрания набор и месец.")
+    is_admin=user.get("role")=="admin"
+    is_coach=user.get("role")=="coach"
     for r in rows:
         state=r.get("confirmation_status") or ("confirmed" if r["status"]=="paid" else "unreported")
+        method=r.get("payment_method")
         icon={"confirmed":"🟢","pending":"🟠","unreported":"🔴"}.get(state,"🔴")
-        label={"confirmed":"ПОТВЪРДЕНО","pending":"ЧАКА ADMIN","unreported":"ДЪЛЖИМА"}.get(state,"ДЪЛЖИМА")
+        label={"confirmed":"ПЛАТЕНО","pending":"ЧАКА ПОТВЪРЖДЕНИЕ","unreported":"ДЪЛЖИМА"}.get(state,"ДЪЛЖИМА")
         with st.expander(f"{icon} {r['first_name']} {r['last_name']} · {r['final_amount']:.2f} € · {label}"):
-            if state=="confirmed":
-                st.success("Плащането е потвърдено и е заключено за треньора.")
+            st.write(f"Метод: **{payment_method_label(method)}**")
+            if r.get("payment_reported_date"): st.write(f"Посочена дата: **{r['payment_reported_date']:%d.%m.%Y}**")
+            if r.get("payment_note"): st.caption(r["payment_note"])
+            if state=="confirmed" or r["status"]=="paid":
+                st.success(f"🟢 Платено · {payment_method_label(method)}")
+                if r.get("paid_at"): st.caption(f"Отразено на {r['paid_at']:%d.%m.%Y}")
             elif state=="pending":
-                st.warning("Плащането е заявено и чака потвърждение от администратор.")
+                if method=="bank":
+                    st.warning("🏦 Банковото плащане чака потвърждение от Admin.")
+                    if is_admin:
+                        a,b=st.columns(2)
+                        if a.button("✅ Потвърди банковото плащане",key=f"admin_bank_confirm_{r['fee_id']}",use_container_width=True):
+                            confirm_fee_payment(r["fee_id"],user["id"],"bank",r.get("payment_reported_date"))
+                            set_flash("✅ Банковото плащане е потвърдено и е включено във финансовата статистика.");st.rerun()
+                        if b.button("↩️ Върни за корекция",key=f"admin_bank_return_{r['fee_id']}",use_container_width=True):
+                            execute("UPDATE player_fees SET status='due',confirmation_status='unreported',confirmed_by=NULL,paid_at=NULL,parent_reported_at=NULL,payment_reported_date=NULL WHERE id=%s AND academy_id=%s",(r["fee_id"],ACADEMY_ID))
+                            set_flash("↩️ Банковото плащане е върнато за корекция.","warning");st.rerun()
+                    elif is_coach:
+                        st.info("Треньорът вижда статуса, но няма право да потвърждава банково плащане.")
+                elif method=="cash":
+                    st.warning("💶 Плащането в брой чака потвърждение от Admin или Coach.")
+                    if is_admin or is_coach:
+                        a,b=st.columns(2)
+                        if a.button("✅ Потвърди получената сума в брой",key=f"cash_confirm_{user['id']}_{r['fee_id']}",use_container_width=True):
+                            confirm_fee_payment(r["fee_id"],user["id"],"cash",r.get("payment_reported_date"))
+                            set_flash("✅ Плащането в брой е потвърдено и е включено във финансовата статистика.");st.rerun()
+                        if is_admin and b.button("↩️ Върни за корекция",key=f"admin_cash_return_{r['fee_id']}",use_container_width=True):
+                            execute("UPDATE player_fees SET status='due',confirmation_status='unreported',confirmed_by=NULL,paid_at=NULL,parent_reported_at=NULL,payment_reported_date=NULL WHERE id=%s AND academy_id=%s",(r["fee_id"],ACADEMY_ID))
+                            set_flash("↩️ Плащането в брой е върнато за корекция.","warning");st.rerun()
+                else:
+                    st.warning("Плащането чака потвърждение от Admin.")
             else:
-                method=st.selectbox("Начин",["cash","bank","card","other"],format_func=lambda x:{"cash":"В брой","bank":"По банка","card":"Карта","other":"Друго"}[x],key=f"pm_{user['id']}_{r['fee_id']}")
-                note=st.text_input("Бележка",key=f"pn_{user['id']}_{r['fee_id']}")
-                if st.button("Изпрати за потвърждение",key=f"pp_{user['id']}_{r['fee_id']}",use_container_width=True):
-                    execute("UPDATE player_fees SET confirmation_status='pending',payment_method=%s,payment_note=%s,payment_recorded_by=%s,parent_reported_at=NOW() WHERE id=%s AND academy_id=%s AND status<>'paid'",(method,note.strip() or None,user["id"],r["fee_id"],ACADEMY_ID)); notify_admins("payment_pending","Плащане чака потвърждение",f"{r['first_name']} {r['last_name']} · {month:02d}.{year}"); st.rerun()
+                if is_admin:
+                    st.info("Admin може директно да отрази получена сума в брой, когато родителят не е подал заявка.")
+                    cash_date=st.date_input("Дата на плащането в брой",date.today(),key=f"admin_direct_cash_date_{r['fee_id']}")
+                    if st.button("💶 Отрази директно като платено в брой",key=f"admin_direct_cash_{r['fee_id']}",use_container_width=True,type="primary"):
+                        confirm_fee_payment(r["fee_id"],user["id"],"cash",cash_date)
+                        set_flash("✅ Плащането в брой е отразено и е включено във финансовата статистика.");st.rerun()
+                elif is_coach:
+                    st.info("🔴 Таксата е дължима. Треньорът може само да следи статуса. За потвърждение в брой е необходима заявка от родителя.")
     st.download_button("📥 Excel: всички набори и деца",payment_excel(payment_rows()),"academy_payments.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True)
 
+
 def admin_payment_confirmation_panel():
-    rows=fetchall("""SELECT pf.id fee_id,pf.*,p.first_name,p.last_name,t.name team_name FROM player_fees pf JOIN players p ON p.id=pf.player_id LEFT JOIN teams t ON t.id=pf.team_id WHERE pf.academy_id=%s AND (pf.confirmation_status='pending' OR pf.status='paid') ORDER BY pf.fee_year DESC,pf.fee_month DESC,t.birth_year,p.first_name""",(ACADEMY_ID,))
-    st.subheader("✅ Потвърждение и връщане на плащания")
-    for r in rows:
-        icon="🟠" if r.get("confirmation_status")=="pending" else "🟢"
-        with st.expander(f"{icon} {r['first_name']} {r['last_name']} · {r.get('team_name') or ''} · {r['fee_month']:02d}.{r['fee_year']} · {r['final_amount']:.2f} €"):
-            st.write(f"Начин: **{r.get('payment_method') or 'не е посочен'}**")
-            if r.get("payment_note"): st.write(r["payment_note"])
-            a,b=st.columns(2)
-            if r.get("confirmation_status")=="pending" and a.button("✅ Потвърди",key=f"admin_confirm_{r['fee_id']}",use_container_width=True):
-                execute("UPDATE player_fees SET status='paid',confirmation_status='confirmed',confirmed_by=%s,paid_at=NOW() WHERE id=%s AND academy_id=%s",(st.session_state.user_id,r["fee_id"],ACADEMY_ID)); st.rerun()
-            if b.button("↩️ Върни за корекция",key=f"admin_return_{r['fee_id']}",use_container_width=True):
-                execute("UPDATE player_fees SET status='due',confirmation_status='unreported',confirmed_by=NULL,paid_at=NULL,parent_reported_at=NULL WHERE id=%s AND academy_id=%s",(r["fee_id"],ACADEMY_ID)); set_flash("↩️ Плащането е върнато за корекция.","warning"); st.rerun()
+    st.info("Потвържденията са налични директно в картите на плащанията по-горе.")
 
 def financial_summary_rows():
     income = fetchall(
@@ -1161,9 +1205,9 @@ def parent_nav():
     items=[("🏠 Начало","Начало"),("📅 Тренировки","Тренировки"),("⚽ Мачове","Мачове"),("💬 Съобщение от треньор","Съобщения"),("💰 Такси и плащане","Такси"),("ℹ️ Информация","Информация"),("📝 Обратна връзка","Обратна връзка"),("🗣️ ФЕН ЧАТ","ФЕН ЧАТ"),("👤 Настройки","Настройки")]
     st.session_state.setdefault("parent_page","Начало")
     with st.container(key="parent_nav"):
-        for start in range(0,len(items),2):
-            cols=st.columns(2)
-            for col,(label,page) in zip(cols,items[start:start+2]):
+        for start in range(0,len(items),3):
+            cols=st.columns(3,gap="small")
+            for col,(label,page) in zip(cols,items[start:start+3]):
                 if col.button(label,key=f"pnav_{page}",use_container_width=True,type="primary" if st.session_state.parent_page==page else "secondary"):
                     st.session_state.parent_page=page; st.rerun()
 
@@ -1678,17 +1722,50 @@ def parent_panel(user):
     elif page=="Такси":
         rows=fetchall("SELECT * FROM player_fees WHERE academy_id=%s AND player_id=%s ORDER BY fee_year DESC,fee_month DESC",(ACADEMY_ID,child["id"]))
         for r in rows:
-            paid=r["status"]=="paid"; pending=r.get("confirmation_status")=="pending"; icon="🟢" if paid else "🟠" if pending else "🔴"; label="ПЛАТЕНА" if paid else "ЧАКА ПОТВЪРЖДЕНИЕ" if pending else "ДЪЛЖИМА"
+            paid=r["status"]=="paid"
+            pending=r.get("confirmation_status")=="pending"
+            icon="🟢" if paid else "🟠" if pending else "🔴"
+            label="ПЛАТЕНА" if paid else "ЧАКА ПОТВЪРЖДЕНИЕ" if pending else "ДЪЛЖИМА"
             with st.expander(f"{icon} {r['fee_month']:02d}.{r['fee_year']} · {r['final_amount']:.2f} € · {label}"):
                 st.write(f"**{icon} {label}**")
-                if not paid:
-                    method=st.radio("Начин на плащане",["cash","bank","card"],format_func=lambda x:{"cash":"В брой","bank":"По банка","card":"С карта"}[x],horizontal=True,key=f"choice_{r['id']}")
-                    if method=="bank":
-                        d=st.date_input("Дата на превода",date.today(),key=f"bd_{r['id']}")
-                        if st.button("Изпрати информацията",key=f"bs_{r['id']}",use_container_width=True):execute("UPDATE player_fees SET payment_method='bank',bank_transfer_date=%s,payment_note='Заявено от родител',confirmation_status='pending',parent_reported_at=NOW() WHERE id=%s",(d,r["id"]));notify_admins("bank_payment","Заявен банков превод",f"{child['first_name']} {child['last_name']} · {child.get('team_name') or 'Без набор'} · {d:%d.%m.%Y}");set_flash("🟠 Изпратено. Плащането чака потвърждение от администратор.","warning");st.rerun()
-                    elif method=="cash":st.info("Плащането в брой се потвърждава от треньор или администратор.")
-                    else:st.info("Плащането с карта предстои.")
-        if not rows:st.info("Няма начислени такси.")
+                if paid:
+                    st.success(f"Платено · {payment_method_label(r.get('payment_method'))}")
+                elif pending:
+                    st.warning(f"Заявен метод: {payment_method_label(r.get('payment_method'))}. Очаква потвърждение.")
+                    if r.get("payment_reported_date"): st.caption(f"Посочена дата: {r['payment_reported_date']:%d.%m.%Y}")
+                else:
+                    method=st.radio(
+                        "Начин на плащане",["cash","bank","card"],
+                        format_func=lambda x:{"cash":"💶 В брой","bank":"🏦 По банка","card":"💳 С карта"}[x],
+                        horizontal=True,key=f"choice_{r['id']}",
+                    )
+                    if method in ("bank","cash"):
+                        payment_date=st.date_input(
+                            "Дата на плащането" if method=="cash" else "Дата на банковия превод",
+                            date.today(),key=f"reported_date_{r['id']}_{method}",
+                        )
+                        button_label="📤 Изпрати плащането в брой за потвърждение" if method=="cash" else "📤 Изпрати банковия превод за потвърждение"
+                        if st.button(button_label,key=f"report_payment_{r['id']}_{method}",use_container_width=True):
+                            execute(
+                                """UPDATE player_fees SET payment_method=%s,payment_reported_date=%s,
+                                   bank_transfer_date=%s,payment_note=%s,confirmation_status='pending',
+                                   parent_reported_at=NOW() WHERE id=%s AND academy_id=%s AND status<>'paid'""",
+                                (method,payment_date,payment_date if method=="bank" else None,
+                                 "Заявено от родител",r["id"],ACADEMY_ID),
+                            )
+                            if method=="bank":
+                                notify_admins("bank_payment","Заявен банков превод",f"{child['first_name']} {child['last_name']} · {child.get('team_name') or 'Без набор'} · {payment_date:%d.%m.%Y}")
+                                set_flash("🟠 Банковият превод е изпратен и чака потвърждение от Admin.","warning")
+                            else:
+                                notify_admins("cash_payment","Заявено плащане в брой",f"{child['first_name']} {child['last_name']} · {child.get('team_name') or 'Без набор'} · {payment_date:%d.%m.%Y}")
+                                coach_user=fetchone("SELECT c.user_id FROM teams t JOIN coaches c ON c.id=t.coach_id WHERE t.academy_id=%s AND t.id=%s",(ACADEMY_ID,child.get("team_id"))) if child.get("team_id") else None
+                                if coach_user and coach_user.get("user_id"):
+                                    create_notification(coach_user["user_id"],"cash_payment","Плащане в брой чака потвърждение",f"{child['first_name']} {child['last_name']} · {payment_date:%d.%m.%Y}")
+                                set_flash("🟠 Плащането в брой е изпратено и чака потвърждение от Admin или Coach.","warning")
+                            st.rerun()
+                    else:
+                        st.info("💳 Картовото плащане ще се отразява автоматично след активиране на платежния оператор. Ръчно потвърждение не е необходимо.")
+        if not rows: st.info("Няма начислени такси.")
     elif page=="Информация":
         parent_information(user)
     elif page=="Известия":
@@ -1940,46 +2017,33 @@ def multi_date_event_form(form_key, teams, user_id, fixed_team_id=None):
                 st.rerun()
 
 def coach_account_manager():
-    coaches = fetchall("""SELECT c.*,u.email,u.account_status,u.active user_active
-                          FROM coaches c LEFT JOIN users u ON u.id=c.user_id
-                          WHERE c.academy_id=%s AND c.active ORDER BY c.id""", (ACADEMY_ID,))
-    st.caption("Всеки треньор използва собствен имейл и парола. Един треньор може да води повече от един набор.")
-    for coach in coaches:
-        with st.expander(f"{coach['display_name']} · {coach.get('email') or 'без достъп'}"):
-            ci1,ci2=st.columns([1,5])
-            with ci1: st.markdown(avatar_html(coach.get("profile_image"),coach.get("profile_image_mime"),82),unsafe_allow_html=True)
-            with ci2:
-                coach_image=st.file_uploader("Снимка на треньора",type=["jpg","jpeg","png","webp"],key=f"coach_image_{coach['id']}")
-                if st.button("Запази снимката",key=f"save_coach_image_{coach['id']}"):
-                    ib,im=valid_profile_image(coach_image)
-                    if ib: execute("UPDATE coaches SET profile_image=%s,profile_image_mime=%s WHERE id=%s AND academy_id=%s",(ib,im,coach["id"],ACADEMY_ID)); st.rerun()
-            name = st.text_input("Име на треньора", coach["display_name"], key=f"coach_name_{coach['id']}")
-            email = st.text_input("Имейл за вход", coach.get("email") or "", key=f"coach_email_{coach['id']}").strip().lower()
-            password = st.text_input("Нова / начална парола", type="password", key=f"coach_pw_{coach['id']}")
-            c1, c2 = st.columns(2)
-            if c1.button("Запази име", key=f"coach_save_name_{coach['id']}", use_container_width=True):
-                execute("UPDATE coaches SET display_name=%s WHERE id=%s AND academy_id=%s", (name.strip(), coach["id"], ACADEMY_ID))
-                st.rerun()
-            if c2.button("Създай / обнови достъп", key=f"coach_access_{coach['id']}", use_container_width=True):
-                if not email or len(password) < 8:
-                    st.error("Въведи валиден имейл и парола с минимум 8 символа.")
+    coaches=fetchall("""SELECT c.*,u.email,u.account_status,u.active user_active FROM coaches c LEFT JOIN users u ON u.id=c.user_id WHERE c.academy_id=%s AND c.active ORDER BY c.id""",(ACADEMY_ID,))
+    st.subheader("👤 Управление на треньор")
+    if not coaches: st.info("Няма активни треньори."); return
+    labels={f"{c['display_name']} · {c.get('email') or 'без достъп'}":c for c in coaches}
+    coach=labels[st.selectbox("Избери треньор",list(labels),key="admin_selected_coach")]
+    with st.container(border=True):
+        a,b=st.columns([1,5])
+        with a: st.markdown(avatar_html(coach.get("profile_image"),coach.get("profile_image_mime"),82),unsafe_allow_html=True)
+        with b:
+            image=st.file_uploader("Снимка на треньора",type=["jpg","jpeg","png","webp"],key=f"coach_image_{coach['id']}")
+            if st.button("Запази снимката",key=f"save_coach_image_{coach['id']}"):
+                ib,im=valid_profile_image(image)
+                if ib: execute("UPDATE coaches SET profile_image=%s,profile_image_mime=%s WHERE id=%s AND academy_id=%s",(ib,im,coach["id"],ACADEMY_ID));set_flash("✅ Снимката е запазена.");st.rerun()
+        name=st.text_input("Име на треньора",coach["display_name"],key=f"coach_name_{coach['id']}")
+        email=st.text_input("Имейл за вход",coach.get("email") or "",key=f"coach_email_{coach['id']}").strip().lower()
+        password=st.text_input("Нова / начална парола",type="password",key=f"coach_pw_{coach['id']}")
+        c1,c2=st.columns(2)
+        if c1.button("Запази име",key=f"coach_save_name_{coach['id']}",use_container_width=True): execute("UPDATE coaches SET display_name=%s WHERE id=%s AND academy_id=%s",(name.strip(),coach["id"],ACADEMY_ID));set_flash("✅ Името е запазено.");st.rerun()
+        if c2.button("Създай / обнови достъп",key=f"coach_access_{coach['id']}",use_container_width=True):
+            if not email or len(password)<8: st.error("Въведи валиден имейл и парола с минимум 8 символа.")
+            else:
+                existing=fetchone("SELECT id FROM users WHERE academy_id=%s AND lower(email)=lower(%s)",(ACADEMY_ID,email))
+                if existing:
+                    uid=existing["id"];execute("UPDATE users SET first_name=%s,last_name='Треньор',password_hash=%s,role='coach',account_status='approved',active=TRUE WHERE id=%s AND academy_id=%s",(name.strip(),hash_password(password),uid,ACADEMY_ID))
                 else:
-                    existing = fetchone("SELECT id FROM users WHERE academy_id=%s AND lower(email)=lower(%s)", (ACADEMY_ID, email))
-                    if existing:
-                        user_id = existing["id"]
-                        execute("""UPDATE users SET first_name=%s,last_name='Треньор',password_hash=%s,
-                                   role='coach',account_status='approved',active=TRUE WHERE id=%s AND academy_id=%s""",
-                                (name.strip(), hash_password(password), user_id, ACADEMY_ID))
-                    else:
-                        row = execute("""INSERT INTO users(academy_id,first_name,last_name,email,password_hash,role,account_status)
-                                         VALUES(%s,%s,'Треньор',%s,%s,'coach','approved') RETURNING id""",
-                                      (ACADEMY_ID, name.strip(), email, hash_password(password)), True)
-                        user_id = row["id"]
-                    execute("UPDATE coaches SET user_id=%s,display_name=%s WHERE id=%s AND academy_id=%s",
-                            (user_id, name.strip(), coach["id"], ACADEMY_ID))
-                    st.success("Треньорският достъп е готов.")
-                    st.rerun()
-
+                    uid=execute("INSERT INTO users(academy_id,first_name,last_name,email,password_hash,role,account_status) VALUES(%s,%s,'Треньор',%s,%s,'coach','approved') RETURNING id",(ACADEMY_ID,name.strip(),email,hash_password(password)),True)["id"]
+                execute("UPDATE coaches SET user_id=%s,display_name=%s WHERE id=%s AND academy_id=%s",(uid,name.strip(),coach["id"],ACADEMY_ID));set_flash("✅ Треньорският достъп е готов.");st.rerun()
 
 def admin_panel(user):
     count = unread_notification_count(user["id"])
@@ -2084,139 +2148,135 @@ def admin_panel(user):
                             st.rerun()
 
     elif sec == "Треньори и набори":
-        coach_account_manager()
-        st.divider()
-        coaches = fetchall("SELECT * FROM coaches WHERE academy_id=%s AND active ORDER BY id", (ACADEMY_ID,))
-        cmap = {c["display_name"]: c["id"] for c in coaches}
-        for team in fetchall("SELECT * FROM teams WHERE academy_id=%s AND active ORDER BY birth_year", (ACADEMY_ID,)):
-            a, b = st.columns([3, 2]); a.write(f"**{team['name']}**")
-            names = ["Без треньор"] + list(cmap)
-            current_row = fetchone("SELECT display_name FROM coaches WHERE id=%s", (team.get("coach_id"),)) if team.get("coach_id") else None
-            current_name = current_row["display_name"] if current_row else "Без треньор"
-            selected = b.selectbox("Треньор", names, index=names.index(current_name) if current_name in names else 0, key=f"tc{team['id']}")
-            if st.button("Запази групата", key=f"ts{team['id']}"):
-                execute("UPDATE teams SET coach_id=%s WHERE id=%s AND academy_id=%s", (None if selected == "Без треньор" else cmap[selected], team["id"], ACADEMY_ID)); st.rerun()
-
+        coach_account_manager();st.divider()
+        coaches=fetchall("SELECT * FROM coaches WHERE academy_id=%s AND active ORDER BY id",(ACADEMY_ID,)); teams=fetchall("SELECT * FROM teams WHERE academy_id=%s AND active ORDER BY birth_year",(ACADEMY_ID,))
+        cmap={c["display_name"]:c["id"] for c in coaches};st.subheader("⚽ Управление на набор")
+        if teams:
+            tmap={t["name"]:t for t in teams};team=tmap[st.selectbox("Избери набор",list(tmap),key="admin_selected_team_assignment")]
+            names=["Без треньор"]+list(cmap);row=fetchone("SELECT display_name FROM coaches WHERE id=%s",(team.get("coach_id"),)) if team.get("coach_id") else None;current=row["display_name"] if row else "Без треньор"
+            selected=st.selectbox("Треньор на набора",names,index=names.index(current) if current in names else 0,key=f"tc{team['id']}")
+            if st.button("💾 Запази треньора за набора",key=f"ts{team['id']}",use_container_width=True): execute("UPDATE teams SET coach_id=%s WHERE id=%s AND academy_id=%s",(None if selected=="Без треньор" else cmap[selected],team["id"],ACADEMY_ID));set_flash(f"✅ {team['name']} е обновен.");st.rerun()
     elif sec == "Роли и права":
         st.caption("Admin има пълен достъп. Coach вижда само своите набори. Parent вижда само своите деца.")
         users = fetchall("SELECT * FROM users WHERE academy_id=%s ORDER BY role,first_name,last_name", (ACADEMY_ID,))
-        for account in users:
-            with st.expander(f"{account['first_name']} {account['last_name']} · {account['email']} · {account['role']}"):
-                roles = ["parent", "coach", "admin"]
-                role = st.selectbox("Роля", roles, index=roles.index(account["role"]) if account["role"] in roles else 0, key=f"role_{account['id']}")
-                active = st.checkbox("Активен профил", value=account["active"], key=f"active_{account['id']}")
-                if st.button("Запази права", key=f"rights_{account['id']}", use_container_width=True):
-                    if account["id"] == user["id"] and (role != "admin" or not active):
-                        st.error("Не можеш да премахнеш собствените си Admin права или да деактивираш текущия профил.")
-                    else:
-                        execute("UPDATE users SET role=%s,active=%s WHERE id=%s AND academy_id=%s", (role, active, account["id"], ACADEMY_ID)); st.rerun()
-
-                st.markdown("#### 🔑 Смяна на парола")
-                new_password = st.text_input(
-                    "Нова парола",
-                    type="password",
-                    key=f"new_password_{account['id']}",
-                    placeholder="Минимум 8 символа",
-                )
-                repeat_password = st.text_input(
-                    "Повтори новата парола",
-                    type="password",
-                    key=f"repeat_password_{account['id']}",
-                )
-                if st.button("🔑 Смени паролата", key=f"change_password_{account['id']}", use_container_width=True):
-                    if len(new_password) < 8:
-                        st.error("Новата парола трябва да бъде минимум 8 символа.")
-                    elif new_password != repeat_password:
-                        st.error("Двете пароли не съвпадат.")
-                    else:
-                        execute(
-                            "UPDATE users SET password_hash=%s WHERE id=%s AND academy_id=%s",
-                            (hash_password(new_password), account["id"], ACADEMY_ID),
-                        )
-                        st.success(f"Паролата за {account['email']} е сменена успешно.")
-
-
-                st.markdown("---")
-                st.markdown("#### 🗑️ Окончателно изтриване на профила")
-                if account["id"] == user["id"] or account["email"].strip().lower() == ADMIN_EMAIL:
-                    st.info("Текущият и основният Admin профил са защитени и не могат да бъдат изтрити от този екран.")
+        user_labels={f"{a['first_name']} {a['last_name']} · {a['email']} · {a['role']}":a for a in users}
+        account=user_labels[st.selectbox("Избери потребител",list(user_labels),key="admin_selected_rights_user")]
+        with st.container(border=True):
+            roles = ["parent", "coach", "admin"]
+            role = st.selectbox("Роля", roles, index=roles.index(account["role"]) if account["role"] in roles else 0, key=f"role_{account['id']}")
+            active = st.checkbox("Активен профил", value=account["active"], key=f"active_{account['id']}")
+            if st.button("Запази права", key=f"rights_{account['id']}", use_container_width=True):
+                if account["id"] == user["id"] and (role != "admin" or not active):
+                    st.error("Не можеш да премахнеш собствените си Admin права или да деактивираш текущия профил.")
                 else:
-                    st.warning(
-                        "Действието е необратимо. Coach достъпът ще бъде освободен. "
-                        "При Parent ще бъдат премахнати връзките с децата, а деца без друг родител ще бъдат изтрити заедно с таксите и присъствията им."
+                    execute("UPDATE users SET role=%s,active=%s WHERE id=%s AND academy_id=%s", (role, active, account["id"], ACADEMY_ID)); st.rerun()
+
+            st.markdown("#### 🔑 Смяна на парола")
+            new_password = st.text_input(
+                "Нова парола",
+                type="password",
+                key=f"new_password_{account['id']}",
+                placeholder="Минимум 8 символа",
+            )
+            repeat_password = st.text_input(
+                "Повтори новата парола",
+                type="password",
+                key=f"repeat_password_{account['id']}",
+            )
+            if st.button("🔑 Смени паролата", key=f"change_password_{account['id']}", use_container_width=True):
+                if len(new_password) < 8:
+                    st.error("Новата парола трябва да бъде минимум 8 символа.")
+                elif new_password != repeat_password:
+                    st.error("Двете пароли не съвпадат.")
+                else:
+                    execute(
+                        "UPDATE users SET password_hash=%s WHERE id=%s AND academy_id=%s",
+                        (hash_password(new_password), account["id"], ACADEMY_ID),
                     )
-                    delete_user_confirmation = st.text_input(
-                        'За потвърждение напиши точно ИЗТРИЙ',
-                        key=f"delete_user_confirm_{account['id']}",
-                        placeholder="ИЗТРИЙ",
-                    )
-                    if st.button(
-                        "🗑️ Изтрий потребителския профил",
-                        key=f"delete_user_{account['id']}",
-                        use_container_width=True,
-                    ):
-                        if delete_user_confirmation.strip() != "ИЗТРИЙ":
-                            st.error('Профилът не е изтрит. Напиши точно „ИЗТРИЙ“.')
-                        else:
-                            with db() as conn, conn.cursor() as cur:
+                    st.success(f"Паролата за {account['email']} е сменена успешно.")
+
+
+            st.markdown("---")
+            st.markdown("#### 🗑️ Окончателно изтриване на профила")
+            if account["id"] == user["id"] or account["email"].strip().lower() == ADMIN_EMAIL:
+                st.info("Текущият и основният Admin профил са защитени и не могат да бъдат изтрити от този екран.")
+            else:
+                st.warning(
+                    "Действието е необратимо. Coach достъпът ще бъде освободен. "
+                    "При Parent ще бъдат премахнати връзките с децата, а деца без друг родител ще бъдат изтрити заедно с таксите и присъствията им."
+                )
+                delete_user_confirmation = st.text_input(
+                    'За потвърждение напиши точно ИЗТРИЙ',
+                    key=f"delete_user_confirm_{account['id']}",
+                    placeholder="ИЗТРИЙ",
+                )
+                if st.button(
+                    "🗑️ Изтрий потребителския профил",
+                    key=f"delete_user_{account['id']}",
+                    use_container_width=True,
+                ):
+                    if delete_user_confirmation.strip() != "ИЗТРИЙ":
+                        st.error('Профилът не е изтрит. Напиши точно „ИЗТРИЙ“.')
+                    else:
+                        with db() as conn, conn.cursor() as cur:
+                            cur.execute(
+                                "SELECT id,role,email FROM users WHERE id=%s AND academy_id=%s FOR UPDATE",
+                                (account["id"], ACADEMY_ID),
+                            )
+                            target = cur.fetchone()
+                            if not target:
+                                st.error("Профилът вече не съществува.")
+                            elif target[0] == user["id"] or target[2].strip().lower() == ADMIN_EMAIL:
+                                st.error("Основният Admin профил е защитен.")
+                            else:
+                                target_id = target[0]
                                 cur.execute(
-                                    "SELECT id,role,email FROM users WHERE id=%s AND academy_id=%s FOR UPDATE",
-                                    (account["id"], ACADEMY_ID),
+                                    "SELECT player_id FROM parent_players WHERE academy_id=%s AND parent_user_id=%s",
+                                    (ACADEMY_ID, target_id),
                                 )
-                                target = cur.fetchone()
-                                if not target:
-                                    st.error("Профилът вече не съществува.")
-                                elif target[0] == user["id"] or target[2].strip().lower() == ADMIN_EMAIL:
-                                    st.error("Основният Admin профил е защитен.")
-                                else:
-                                    target_id = target[0]
-                                    cur.execute(
-                                        "SELECT player_id FROM parent_players WHERE academy_id=%s AND parent_user_id=%s",
-                                        (ACADEMY_ID, target_id),
-                                    )
-                                    linked_players = [row[0] for row in cur.fetchall()]
+                                linked_players = [row[0] for row in cur.fetchall()]
 
-                                    cur.execute(
-                                        "UPDATE coaches SET user_id=NULL WHERE academy_id=%s AND user_id=%s",
-                                        (ACADEMY_ID, target_id),
-                                    )
-                                    cur.execute(
-                                        "UPDATE events SET created_by=NULL WHERE academy_id=%s AND created_by=%s",
-                                        (ACADEMY_ID, target_id),
-                                    )
-                                    cur.execute(
-                                        "UPDATE team_messages SET sender_user_id=NULL WHERE academy_id=%s AND sender_user_id=%s",
-                                        (ACADEMY_ID, target_id),
-                                    )
-                                    cur.execute(
-                                        "UPDATE public_posts SET created_by=NULL WHERE academy_id=%s AND created_by=%s",
-                                        (ACADEMY_ID, target_id),
-                                    )
-                                    cur.execute(
-                                        "UPDATE attendance SET marked_by=NULL WHERE academy_id=%s AND marked_by=%s",
-                                        (ACADEMY_ID, target_id),
-                                    )
-                                    cur.execute(
-                                        "DELETE FROM parent_players WHERE academy_id=%s AND parent_user_id=%s",
-                                        (ACADEMY_ID, target_id),
-                                    )
+                                cur.execute(
+                                    "UPDATE coaches SET user_id=NULL WHERE academy_id=%s AND user_id=%s",
+                                    (ACADEMY_ID, target_id),
+                                )
+                                cur.execute(
+                                    "UPDATE events SET created_by=NULL WHERE academy_id=%s AND created_by=%s",
+                                    (ACADEMY_ID, target_id),
+                                )
+                                cur.execute(
+                                    "UPDATE team_messages SET sender_user_id=NULL WHERE academy_id=%s AND sender_user_id=%s",
+                                    (ACADEMY_ID, target_id),
+                                )
+                                cur.execute(
+                                    "UPDATE public_posts SET created_by=NULL WHERE academy_id=%s AND created_by=%s",
+                                    (ACADEMY_ID, target_id),
+                                )
+                                cur.execute(
+                                    "UPDATE attendance SET marked_by=NULL WHERE academy_id=%s AND marked_by=%s",
+                                    (ACADEMY_ID, target_id),
+                                )
+                                cur.execute(
+                                    "DELETE FROM parent_players WHERE academy_id=%s AND parent_user_id=%s",
+                                    (ACADEMY_ID, target_id),
+                                )
 
-                                    for player_id in linked_players:
-                                        cur.execute(
-                                            "SELECT COUNT(*) FROM parent_players WHERE academy_id=%s AND player_id=%s",
-                                            (ACADEMY_ID, player_id),
-                                        )
-                                        if cur.fetchone()[0] == 0:
-                                            cur.execute("DELETE FROM attendance WHERE academy_id=%s AND player_id=%s", (ACADEMY_ID, player_id))
-                                            cur.execute("DELETE FROM player_fees WHERE academy_id=%s AND player_id=%s", (ACADEMY_ID, player_id))
-                                            cur.execute("DELETE FROM players WHERE academy_id=%s AND id=%s", (ACADEMY_ID, player_id))
-
+                                for player_id in linked_players:
                                     cur.execute(
-                                        "DELETE FROM users WHERE academy_id=%s AND id=%s",
-                                        (ACADEMY_ID, target_id),
+                                        "SELECT COUNT(*) FROM parent_players WHERE academy_id=%s AND player_id=%s",
+                                        (ACADEMY_ID, player_id),
                                     )
-                            st.success(f"Профилът {account['email']} е изтрит окончателно.")
-                            st.rerun()
+                                    if cur.fetchone()[0] == 0:
+                                        cur.execute("DELETE FROM attendance WHERE academy_id=%s AND player_id=%s", (ACADEMY_ID, player_id))
+                                        cur.execute("DELETE FROM player_fees WHERE academy_id=%s AND player_id=%s", (ACADEMY_ID, player_id))
+                                        cur.execute("DELETE FROM players WHERE academy_id=%s AND id=%s", (ACADEMY_ID, player_id))
+
+                                cur.execute(
+                                    "DELETE FROM users WHERE academy_id=%s AND id=%s",
+                                    (ACADEMY_ID, target_id),
+                                )
+                        st.success(f"Профилът {account['email']} е изтрит окончателно.")
+                        st.rerun()
 
     elif sec == "Тренировки и мачове":
         teams = fetchall("SELECT * FROM teams WHERE academy_id=%s AND active ORDER BY birth_year", (ACADEMY_ID,))
@@ -2328,7 +2388,7 @@ def coach_panel(user):
     sections = ["Табло", "Тренировки и мачове", "Група за мача", "Присъствие", "Такси", "Съобщения", "Обратна връзка"]
     sec = st.sidebar.radio("Треньорско меню", sections)
     tmap = {t["name"]: t for t in teams}
-    team_name = st.selectbox("Избран набор", list(tmap), key="coach_selected_team")
+    team_name = st.selectbox("Набор", list(tmap), key="coach_selected_team")
     team = tmap[team_name]
 
     if sec == "Табло":
