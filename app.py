@@ -33,7 +33,18 @@ if not DATABASE_URL:
 
 @st.cache_resource
 def pool():
-    return ThreadedConnectionPool(1, 8, dsn=DATABASE_URL, sslmode="require")
+    return ThreadedConnectionPool(
+        1,
+        8,
+        dsn=DATABASE_URL,
+        sslmode="require",
+        connect_timeout=10,
+        keepalives=1,
+        keepalives_idle=30,
+        keepalives_interval=10,
+        keepalives_count=5,
+        application_name="academy_manager",
+    )
 
 @contextmanager
 def db():
