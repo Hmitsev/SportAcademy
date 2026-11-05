@@ -1292,7 +1292,7 @@ def render_parent_player_development(user,child):
         match_rating_row=fetchone("SELECT AVG(mps.match_rating)::numeric avg_rating FROM match_player_stats mps JOIN events e ON e.id=mps.event_id WHERE mps.academy_id=%s AND mps.player_id=%s AND mps.match_rating IS NOT NULL",(ACADEMY_ID,child["id"]))
     else:
         selected_year=int(selected_period.split()[0])
-        match_rating_row=fetchone("SELECT AVG(mps.match_rating)::numeric avg_rating FROM match_player_stats mps JOIN events e ON e.id=mps.event_id WHERE mps.academy_id=%s AND mps.player_id=%s AND mps.match_rating IS NOT NULL AND date_part('year', e.starts_at)=%s",(ACADEMY_ID,child["id"],selected_year))
+        match_rating_row=fetchone("SELECT AVG(mps.match_rating)::numeric avg_rating FROM match_player_stats mps JOIN events e ON e.id=mps.event_id WHERE mps.academy_id=%s AND mps.player_id=%s AND mps.match_rating IS NOT NULL AND EXTRACT(YEAR FROM e.starts_at)::int = %s",(ACADEMY_ID,child["id"],selected_year))
     if match_rating_row and match_rating_row.get("avg_rating") is not None:
         match_avg=float(match_rating_row["avg_rating"]); period_total=period_total*0.80+match_avg*0.20
         st.caption(f"Общата оценка включва 80% месечно развитие и 20% оценки от мачове. Средна мачова оценка: {match_avg:.1f}/5")
@@ -1310,7 +1310,7 @@ def render_parent_player_development(user,child):
         """SELECT AVG(mps.match_rating)::numeric avg_rating FROM match_player_stats mps
            JOIN events e ON e.id=mps.event_id
            WHERE mps.academy_id=%s AND mps.player_id=%s AND mps.match_rating IS NOT NULL
-             AND date_part('year', e.starts_at)=%s AND date_part('month', e.starts_at)=%s""",
+             AND EXTRACT(YEAR FROM e.starts_at)::int = %s AND EXTRACT(MONTH FROM e.starts_at)::int = %s""",
         (ACADEMY_ID,child["id"],latest["evaluation_year"],latest["evaluation_month"]),
     )
     latest_match_avg=float(latest_match_row["avg_rating"]) if latest_match_row and latest_match_row.get("avg_rating") is not None else None
@@ -1561,12 +1561,12 @@ def render_results_dashboard(team, editable=False, key_prefix="results"):
                 execute("UPDATE teams SET standings_url=%s WHERE academy_id=%s AND id=%s",(new_url.strip() or None,ACADEMY_ID,team["id"]))
                 set_flash("✅ Линкът към класирането е запазен.");st.rerun()
             if new_url.strip(): b.link_button("🔗 Отвори",new_url.strip(),use_container_width=True)
-    years=fetchall("""SELECT DISTINCT date_part('year',e.starts_at)::int year FROM match_reports mr JOIN events e ON e.id=mr.event_id WHERE mr.academy_id=%s AND mr.team_id=%s AND mr.confirmed ORDER BY year DESC""",(ACADEMY_ID,team["id"]))
+    years=fetchall("""SELECT DISTINCT EXTRACT(YEAR FROM e.starts_at)::int AS match_year FROM match_reports mr JOIN events e ON e.id=mr.event_id WHERE mr.academy_id=%s AND mr.team_id=%s AND mr.confirmed ORDER BY match_year DESC""",(ACADEMY_ID,team["id"]))
     if not years:
         st.info("Няма потвърдени резултати.")
         return
-    selected_year=st.selectbox("Година",[r["year"] for r in years],key=f"{key_prefix}_year_{team['id']}")
-    rows=fetchall("""SELECT mr.*,e.title,e.starts_at FROM match_reports mr JOIN events e ON e.id=mr.event_id WHERE mr.academy_id=%s AND mr.team_id=%s AND mr.confirmed AND date_part('year',e.starts_at)::int=%s ORDER BY e.starts_at DESC""",(ACADEMY_ID,team["id"],selected_year))
+    selected_year=st.selectbox("Година",[r["match_year"] for r in years],key=f"{key_prefix}_year_{team['id']}")
+    rows=fetchall("""SELECT mr.*,e.title,e.starts_at FROM match_reports mr JOIN events e ON e.id=mr.event_id WHERE mr.academy_id=%s AND mr.team_id=%s AND mr.confirmed AND EXTRACT(YEAR FROM e.starts_at)::int = %s ORDER BY e.starts_at DESC""",(ACADEMY_ID,team["id"],selected_year))
     wins=sum(r["home_score"]>r["away_score"] for r in rows);draws=sum(r["home_score"]==r["away_score"] for r in rows);losses=len(rows)-wins-draws
     for col,label,val in zip(st.columns(4),["Мачове","Победи","Равни","Загуби"],[len(rows),wins,draws,losses]):col.metric(label,val)
     matches_tab,scorers_tab=st.tabs(["📅 Резултати","⚽ Голмайстори"])
@@ -1580,7 +1580,7 @@ def render_results_dashboard(team, editable=False, key_prefix="results"):
                 scorers=fetchall("SELECT p.first_name,p.last_name,mps.goals FROM match_player_stats mps JOIN players p ON p.id=mps.player_id WHERE mps.academy_id=%s AND mps.event_id=%s AND mps.goals>0 ORDER BY mps.goals DESC",(ACADEMY_ID,r["event_id"]))
                 if scorers:st.write("⚽ Голмайстори: "+", ".join(f"{x['first_name']} {x['last_name']} ({x['goals']})" for x in scorers))
     with scorers_tab:
-        scorers=fetchall("""SELECT p.id,p.first_name,p.last_name,COALESCE(SUM(mps.goals),0)::int goals FROM match_player_stats mps JOIN players p ON p.id=mps.player_id JOIN events e ON e.id=mps.event_id WHERE mps.academy_id=%s AND p.team_id=%s AND date_part('year',e.starts_at)::int=%s GROUP BY p.id,p.first_name,p.last_name HAVING SUM(mps.goals)>0 ORDER BY goals DESC,p.first_name""",(ACADEMY_ID,team["id"],selected_year))
+        scorers=fetchall("""SELECT p.id,p.first_name,p.last_name,COALESCE(SUM(mps.goals),0)::int goals FROM match_player_stats mps JOIN players p ON p.id=mps.player_id JOIN events e ON e.id=mps.event_id WHERE mps.academy_id=%s AND p.team_id=%s AND EXTRACT(YEAR FROM e.starts_at)::int = %s GROUP BY p.id,p.first_name,p.last_name HAVING SUM(mps.goals)>0 ORDER BY goals DESC,p.first_name""",(ACADEMY_ID,team["id"],selected_year))
         if not scorers:st.info("Няма записани голмайстори за избраната година.")
         medals=["🥇","🥈","🥉"]
         for i,player in enumerate(scorers,1):
