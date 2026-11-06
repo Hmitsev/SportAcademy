@@ -2702,7 +2702,11 @@ def admin_panel(user):
             payment_panel(user)
             st.divider()
             financial_dashboard()
-        else:
+        elif fee_page == "Екипировка":
+            admin_shop_panel(user)
+            st.divider()
+            financial_dashboard()
+        elif fee_page == "Разход":
             expense_panel(user)
 
     elif sec == "Информация":
