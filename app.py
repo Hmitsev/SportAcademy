@@ -420,6 +420,42 @@ def init_db():
         """CREATE INDEX IF NOT EXISTS idx_event_attachments_event ON event_attachments(academy_id,event_id,created_at DESC)""",
         """ALTER TABLE player_evaluations ADD COLUMN IF NOT EXISTS match_bonus NUMERIC(4,2) NOT NULL DEFAULT 0""",
         """CREATE INDEX IF NOT EXISTS idx_fees_player ON player_fees(academy_id,player_id,fee_year,fee_month)""",
+      """CREATE TABLE IF NOT EXISTS shop_products(
+          id BIGSERIAL PRIMARY KEY, academy_id BIGINT NOT NULL REFERENCES academies(id) ON DELETE CASCADE,
+          name TEXT NOT NULL, category TEXT NOT NULL DEFAULT 'Екипировка', description TEXT,
+          price NUMERIC(12,2) NOT NULL CHECK(price>=0), size_info TEXT, stock_quantity INTEGER NOT NULL DEFAULT 0 CHECK(stock_quantity>=0),
+          min_stock INTEGER NOT NULL DEFAULT 0 CHECK(min_stock>=0), image_data BYTEA, image_mime TEXT,
+          active BOOLEAN NOT NULL DEFAULT TRUE, created_by BIGINT REFERENCES users(id) ON DELETE SET NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""",
+      """CREATE INDEX IF NOT EXISTS idx_shop_products_active ON shop_products(academy_id,active,category,name)""",
+      """CREATE TABLE IF NOT EXISTS shop_orders(
+          id BIGSERIAL PRIMARY KEY, academy_id BIGINT NOT NULL REFERENCES academies(id) ON DELETE CASCADE,
+          product_id BIGINT NOT NULL REFERENCES shop_products(id) ON DELETE RESTRICT,
+          parent_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          player_id BIGINT NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+          quantity INTEGER NOT NULL DEFAULT 1 CHECK(quantity>0), unit_price NUMERIC(12,2) NOT NULL,
+          selected_size TEXT, payment_method TEXT NOT NULL CHECK(payment_method IN ('bank','card')),
+          payment_status TEXT NOT NULL DEFAULT 'pending' CHECK(payment_status IN ('pending','paid','rejected')),
+          fulfilment_status TEXT NOT NULL DEFAULT 'new' CHECK(fulfilment_status IN ('new','available','ordered','ready','delivered','cancelled')),
+          admin_comment TEXT, parent_note TEXT, confirmed_by BIGINT REFERENCES users(id) ON DELETE SET NULL,
+          paid_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""",
+      """CREATE INDEX IF NOT EXISTS idx_shop_orders_status ON shop_orders(academy_id,payment_status,fulfilment_status,created_at DESC)""",
+      """CREATE TABLE IF NOT EXISTS club_inventory(
+          id BIGSERIAL PRIMARY KEY, academy_id BIGINT NOT NULL REFERENCES academies(id) ON DELETE CASCADE,
+          item_name TEXT NOT NULL, category TEXT NOT NULL DEFAULT 'Други', quantity INTEGER NOT NULL DEFAULT 0 CHECK(quantity>=0),
+          condition_status TEXT NOT NULL DEFAULT 'good' CHECK(condition_status IN ('new','good','worn','damaged','retired')),
+          purchase_date DATE, replacement_due DATE, note TEXT, active BOOLEAN NOT NULL DEFAULT TRUE,
+          created_by BIGINT REFERENCES users(id) ON DELETE SET NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""",
+      """CREATE TABLE IF NOT EXISTS training_resources(
+          id BIGSERIAL PRIMARY KEY, academy_id BIGINT NOT NULL REFERENCES academies(id) ON DELETE CASCADE,
+          title TEXT NOT NULL, resource_type TEXT NOT NULL DEFAULT 'link' CHECK(resource_type IN ('video','link','image')),
+          url TEXT, description TEXT, image_data BYTEA, image_mime TEXT, active BOOLEAN NOT NULL DEFAULT TRUE,
+          created_by BIGINT REFERENCES users(id) ON DELETE SET NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""",
+      """CREATE TABLE IF NOT EXISTS coach_inbox_messages(
+          id BIGSERIAL PRIMARY KEY, academy_id BIGINT NOT NULL REFERENCES academies(id) ON DELETE CASCADE,
+          coach_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          admin_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL, subject TEXT NOT NULL, body TEXT NOT NULL,
+          is_read BOOLEAN NOT NULL DEFAULT FALSE, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""",
     ]
     with db() as conn, conn.cursor() as cur:
         for sql in statements: cur.execute(sql)
@@ -1128,7 +1164,11 @@ def payment_panel(user,team_ids=None,fixed_team_id=None):
     month=c1.selectbox("Месец",range(1,13),index=now.month-1,key=f"fee_month_{user['id']}_{team['id']}")
     year=int(c2.number_input("Година",2024,2045,now.year,key=f"fee_year_{user['id']}_{team['id']}"))
     rows=[r for r in payment_rows(team["id"]) if int(r["fee_month"])==month and int(r["fee_year"])==year]
-    if not rows: st.info("Няма начислени такси за избрания набор и месец.")
+    status_filter=st.radio("Покажи",["Всички","Дължими","Чакащи потвърждение","Платени"],horizontal=True,key=f"fee_status_filter_{user['id']}_{team['id']}")
+    if status_filter=="Дължими": rows=[r for r in rows if r["status"]!="paid" and (r.get("confirmation_status") or "unreported")=="unreported"]
+    elif status_filter=="Чакащи потвърждение": rows=[r for r in rows if (r.get("confirmation_status") or "")=="pending"]
+    elif status_filter=="Платени": rows=[r for r in rows if r["status"]=="paid"]
+    if not rows: st.info("Няма плащания за избраните набор, период и статус.")
     is_admin=user.get("role")=="admin"
     is_coach=user.get("role")=="coach"
     for r in rows:
@@ -1197,19 +1237,21 @@ def financial_summary_rows():
            FROM expenses WHERE academy_id=%s GROUP BY payment_method""",
         (ACADEMY_ID,),
     )
+    shop_income = fetchall("""SELECT payment_method,COALESCE(SUM(unit_price*quantity),0) total FROM shop_orders WHERE academy_id=%s AND payment_status='paid' GROUP BY payment_method""",(ACADEMY_ID,))
     income_map = {r["payment_method"]: float(r["total"]) for r in income}
+    shop_income_map = {r["payment_method"]: float(r["total"]) for r in shop_income}
     expense_map = {r["payment_method"]: float(r["total"]) for r in expenses}
-    return income_map, expense_map
+    return income_map, expense_map, shop_income_map
 
 
 def financial_report_excel():
-    income_map, expense_map = financial_summary_rows()
+    income_map, expense_map, shop_income_map = financial_summary_rows()
     methods = [("bank","По банка"),("cash","В брой"),("card","Карта"),("other","Друго")]
     rows=[]
     for key,label in methods:
-        inc=income_map.get(key,0.0); exp=expense_map.get(key,0.0)
+        inc=income_map.get(key,0.0)+shop_income_map.get(key,0.0); exp=expense_map.get(key,0.0)
         rows.append({"Начин":label,"Приход €":inc,"Разход €":exp,"Нетно €":inc-exp})
-    total_income=sum(income_map.values()); total_expense=sum(expense_map.values())
+    total_income=sum(income_map.values())+sum(shop_income_map.values()); total_expense=sum(expense_map.values())
     rows.append({"Начин":"ТОТАЛ","Приход €":total_income,"Разход €":total_expense,"Нетно €":total_income-total_expense})
     details = fetchall(
         "SELECT expense_date,category,amount,payment_method,description,created_at FROM expenses WHERE academy_id=%s ORDER BY expense_date DESC,created_at DESC",
@@ -1229,16 +1271,17 @@ def financial_report_excel():
 
 
 def financial_dashboard():
-    income_map, expense_map = financial_summary_rows()
-    bank=income_map.get("bank",0.0); cash=income_map.get("cash",0.0); card=income_map.get("card",0.0)
-    expenses_total=sum(expense_map.values()); total_income=sum(income_map.values()); net=total_income-expenses_total
+    income_map, expense_map, shop_income_map = financial_summary_rows()
+    bank=income_map.get("bank",0.0); cash=income_map.get("cash",0.0); card=income_map.get("card",0.0); shop_total=sum(shop_income_map.values())
+    expenses_total=sum(expense_map.values()); total_income=sum(income_map.values())+shop_total; net=total_income-expenses_total
     st.subheader("Финансово табло")
-    cols=st.columns(5)
+    cols=st.columns(6)
     cols[0].metric("По банка",f"{bank:.2f} €")
     cols[1].metric("В брой",f"{cash:.2f} €")
     cols[2].metric("Карта",f"{card:.2f} €")
-    cols[3].metric("Разход",f"{expenses_total:.2f} €")
-    cols[4].metric("Тотал",f"{net:.2f} €",help="Общи приходи минус общи разходи")
+    cols[3].metric("Приход екип/артикул",f"{shop_total:.2f} €")
+    cols[4].metric("Разход",f"{expenses_total:.2f} €")
+    cols[5].metric("Тотал",f"{net:.2f} €",help="Такси + платени артикули - разходи")
     st.download_button(
         "📥 Изтегли само финансовата справка",
         financial_report_excel(),
@@ -1280,6 +1323,109 @@ def expense_panel(user):
                 execute("DELETE FROM expenses WHERE academy_id=%s AND id=%s",(ACADEMY_ID,row["id"])); st.rerun()
     if not rows: st.info("Няма въведени разходи.")
 
+
+def product_catalog_parent(user,child):
+    st.subheader("🛍️ Екипировка / аксесоари")
+    rows=fetchall("SELECT * FROM shop_products WHERE academy_id=%s AND active ORDER BY category,name",(ACADEMY_ID,))
+    if not rows: st.info("В момента няма публикувани артикули."); return
+    for item in rows:
+        with st.container(border=True):
+            a,b=st.columns([1,3])
+            with a:
+                if item.get("image_data"): st.image(bytes(item["image_data"]),use_container_width=True)
+            with b:
+                st.markdown(f"### {item['name']} · {item['price']:.2f} €")
+                st.caption(f"{item['category']} · Налични: {item['stock_quantity']}")
+                if item.get("description"): st.write(item["description"])
+                if item.get("size_info"): st.write(f"Размери/варианти: {item['size_info']}")
+                qty=st.number_input("Количество",1,max(1,int(item['stock_quantity'])),1,key=f"shop_qty_{child['id']}_{item['id']}",disabled=item['stock_quantity']<=0)
+                size=st.text_input("Избран размер/вариант",key=f"shop_size_{child['id']}_{item['id']}")
+                method=st.radio("Плащане",["bank","card"],format_func=lambda x:{"bank":"🏦 По банка","card":"💳 С карта"}[x],horizontal=True,key=f"shop_method_{child['id']}_{item['id']}")
+                note=st.text_input("Бележка към поръчката",key=f"shop_note_{child['id']}_{item['id']}")
+                if st.button("Поръчай",key=f"shop_order_{child['id']}_{item['id']}",use_container_width=True,disabled=item['stock_quantity']<=0):
+                    execute("""INSERT INTO shop_orders(academy_id,product_id,parent_user_id,player_id,quantity,unit_price,selected_size,payment_method,parent_note) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)""",(ACADEMY_ID,item['id'],user['id'],child['id'],qty,item['price'],size.strip() or None,method,note.strip() or None))
+                    notify_admins("shop_order","Нова поръчка за екипировка",f"{child['first_name']} {child['last_name']} · {item['name']} · {qty} бр.")
+                    set_flash("✅ Поръчката е изпратена. Следи статуса и коментара от академията.");st.rerun()
+    st.markdown("### Моите поръчки")
+    orders=fetchall("""SELECT o.*,p.name product_name FROM shop_orders o JOIN shop_products p ON p.id=o.product_id WHERE o.academy_id=%s AND o.parent_user_id=%s AND o.player_id=%s ORDER BY o.created_at DESC""",(ACADEMY_ID,user['id'],child['id']))
+    for o in orders:
+        labels={"pending":"Чака потвърждение","paid":"Платено","rejected":"Отказано"}; fulfil={"new":"Нова","available":"Има наличност","ordered":"Ще бъде поръчано","ready":"Готово за получаване","delivered":"Получено","cancelled":"Отказано"}
+        with st.expander(f"{o['product_name']} · {o['unit_price']*o['quantity']:.2f} € · {labels.get(o['payment_status'],o['payment_status'])}"):
+            st.write(f"Статус: **{fulfil.get(o['fulfilment_status'],o['fulfilment_status'])}**")
+            if o.get('admin_comment'): st.info(f"Съобщение от академията: {o['admin_comment']}")
+
+def admin_shop_panel(user):
+    st.subheader("🛍️ Екипировка / аксесоари")
+    catalog,orders,club=st.tabs(["Асортимент за родители","Поръчки и плащания","Клубен инвентар"])
+    with catalog:
+        with st.form("new_shop_product",clear_on_submit=True):
+            c1,c2=st.columns(2); name=c1.text_input("Артикул");category=c2.selectbox("Категория",["Екипировка","Аксесоар","Облекло","Друго"])
+            description=st.text_area("Информация/описание"); c3,c4,c5=st.columns(3); price=c3.number_input("Цена €",0.0,10000.0,0.0,.01); stock=c4.number_input("Наличност",0,100000,0); minimum=c5.number_input("Минимална наличност",0,100000,0)
+            size_info=st.text_input("Размери/варианти"); image=st.file_uploader("Снимка",type=["jpg","jpeg","png","webp"]); save=st.form_submit_button("Добави артикул",use_container_width=True)
+        if save:
+            if not name.strip() or price<=0: st.error("Въведи име и цена над 0.")
+            else:
+                execute("""INSERT INTO shop_products(academy_id,name,category,description,price,size_info,stock_quantity,min_stock,image_data,image_mime,created_by) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",(ACADEMY_ID,name.strip(),category,description.strip() or None,price,size_info.strip() or None,stock,minimum,image.getvalue() if image else None,image.type if image else None,user['id']))
+                set_flash("✅ Артикулът е добавен.");st.rerun()
+        products=fetchall("SELECT * FROM shop_products WHERE academy_id=%s ORDER BY active DESC,category,name",(ACADEMY_ID,))
+        for x in products:
+            with st.expander(f"{x['name']} · {x['price']:.2f} € · налични {x['stock_quantity']}"):
+                q=st.number_input("Нова наличност",0,100000,int(x['stock_quantity']),key=f"stock_{x['id']}"); active=st.checkbox("Видим за родители",x['active'],key=f"product_active_{x['id']}")
+                if q<=x['min_stock']: st.warning("Наличността е на или под минималния праг.")
+                if st.button("Запази",key=f"save_product_{x['id']}"): execute("UPDATE shop_products SET stock_quantity=%s,active=%s,updated_at=NOW() WHERE id=%s AND academy_id=%s",(q,active,x['id'],ACADEMY_ID));st.rerun()
+    with orders:
+        flt=st.selectbox("Филтър",["Всички","Чакащи","Платени","За доставка","Готови","Приключени"])
+        all_orders=fetchall("""SELECT o.*,p.name product_name,u.first_name,u.last_name,pl.first_name player_first,pl.last_name player_last FROM shop_orders o JOIN shop_products p ON p.id=o.product_id JOIN users u ON u.id=o.parent_user_id JOIN players pl ON pl.id=o.player_id WHERE o.academy_id=%s ORDER BY o.created_at DESC""",(ACADEMY_ID,))
+        for o in all_orders:
+            if flt=="Чакащи" and o['payment_status']!='pending': continue
+            if flt=="Платени" and o['payment_status']!='paid': continue
+            if flt=="За доставка" and o['fulfilment_status'] not in ('new','ordered'): continue
+            if flt=="Готови" and o['fulfilment_status']!='ready': continue
+            if flt=="Приключени" and o['fulfilment_status'] not in ('delivered','cancelled'): continue
+            with st.expander(f"{o['product_name']} · {o['player_first']} {o['player_last']} · {o['unit_price']*o['quantity']:.2f} €"):
+                pay=st.selectbox("Плащане",["pending","paid","rejected"],index=["pending","paid","rejected"].index(o['payment_status']),key=f"order_pay_{o['id']}")
+                fulfil=st.selectbox("Изпълнение",["new","available","ordered","ready","delivered","cancelled"],index=["new","available","ordered","ready","delivered","cancelled"].index(o['fulfilment_status']),format_func=lambda x:{"new":"Нова","available":"Има наличност","ordered":"Ще бъде поръчано","ready":"Готово за получаване","delivered":"Получено","cancelled":"Отказано"}[x],key=f"order_fulfil_{o['id']}")
+                comment=st.text_area("Съобщение към родителя",value=o.get('admin_comment') or '',key=f"order_comment_{o['id']}")
+                if st.button("Потвърди и изпрати статуса",key=f"save_order_{o['id']}",use_container_width=True):
+                    was_paid=o['payment_status']=='paid'
+                    with db() as conn,conn.cursor() as cur:
+                        cur.execute("UPDATE shop_orders SET payment_status=%s,fulfilment_status=%s,admin_comment=%s,confirmed_by=%s,paid_at=CASE WHEN %s='paid' THEN COALESCE(paid_at,NOW()) ELSE NULL END,updated_at=NOW() WHERE id=%s AND academy_id=%s",(pay,fulfil,comment.strip() or None,user['id'],pay,o['id'],ACADEMY_ID))
+                        if pay=='paid' and not was_paid: cur.execute("UPDATE shop_products SET stock_quantity=GREATEST(0,stock_quantity-%s),updated_at=NOW() WHERE id=%s AND academy_id=%s",(o['quantity'],o['product_id'],ACADEMY_ID))
+                    create_notification(o['parent_user_id'],"shop_order_status",f"Обновена поръчка: {o['product_name']}",comment.strip() or "Провери новия статус на поръчката.")
+                    set_flash("✅ Статусът е записан и родителят е уведомен.");st.rerun()
+    with club:
+        with st.form("club_inventory_add",clear_on_submit=True):
+            a,b,c=st.columns(3);item=a.text_input("Артикул");cat=b.selectbox("Тип",["Топки","Шапки","Чували","Тренировъчни пособия","Друго"]);qty=c.number_input("Количество",0,100000,0)
+            condition=st.selectbox("Състояние",["new","good","worn","damaged","retired"],format_func=lambda x:{"new":"Ново","good":"Добро","worn":"Амортизирано","damaged":"Повредено","retired":"Бракувано"}[x]);note=st.text_input("Бележка");add=st.form_submit_button("Добави към клубния инвентар",use_container_width=True)
+        if add and item.strip(): execute("INSERT INTO club_inventory(academy_id,item_name,category,quantity,condition_status,note,created_by) VALUES(%s,%s,%s,%s,%s,%s,%s)",(ACADEMY_ID,item.strip(),cat,qty,condition,note.strip() or None,user['id']));st.rerun()
+        status=st.selectbox("Филтър по състояние",["Всички","new","good","worn","damaged","retired"])
+        inv=fetchall("SELECT * FROM club_inventory WHERE academy_id=%s AND active ORDER BY category,item_name",(ACADEMY_ID,))
+        for x in inv:
+            if status!="Всички" and x['condition_status']!=status: continue
+            st.write(f"**{x['item_name']}** · {x['category']} · {x['quantity']} бр. · {x['condition_status']}")
+
+def admin_training_resources(user):
+    st.subheader("🎓 Управление тренировки")
+    with st.form("training_resource_form",clear_on_submit=True):
+        title=st.text_input("Заглавие");typ=st.radio("Тип",["video","link","image"],format_func=lambda x:{"video":"Видео","link":"Линк към сайт","image":"Снимка и информация"}[x],horizontal=True);url=st.text_input("Линк");description=st.text_area("Описание/упражнение");image=st.file_uploader("Снимка",type=["jpg","jpeg","png","webp"]);save=st.form_submit_button("Добави упражнение",use_container_width=True)
+    if save and title.strip(): execute("INSERT INTO training_resources(academy_id,title,resource_type,url,description,image_data,image_mime,created_by) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",(ACADEMY_ID,title.strip(),typ,url.strip() or None,description.strip() or None,image.getvalue() if image else None,image.type if image else None,user['id']));set_flash("✅ Упражнението е публикувано към треньорите.");st.rerun()
+    for r in fetchall("SELECT * FROM training_resources WHERE academy_id=%s AND active ORDER BY created_at DESC",(ACADEMY_ID,)):
+        with st.expander(r['title']):
+            if r.get('description'):st.write(r['description'])
+            if st.button("🗑️ Премахни",key=f"del_resource_{r['id']}"):execute("UPDATE training_resources SET active=FALSE WHERE id=%s AND academy_id=%s",(r['id'],ACADEMY_ID));st.rerun()
+
+def coach_exercises_panel():
+    st.subheader("🎓 Упражнения")
+    rows=fetchall("SELECT * FROM training_resources WHERE academy_id=%s AND active ORDER BY created_at DESC",(ACADEMY_ID,))
+    if not rows:st.info("Няма добавени упражнения.");return
+    for r in rows:
+        with st.container(border=True):
+            st.subheader(r['title'])
+            if r.get('description'):st.write(r['description'])
+            if r.get('image_data'):st.image(bytes(r['image_data']),use_container_width=True)
+            if r.get('url'):
+                if r['resource_type']=='video':st.video(r['url'])
+                else:st.link_button("🔗 Отвори материала",r['url'])
 
 def register_parent():
     st.subheader("Регистрация на родител")
@@ -1353,23 +1499,22 @@ def month_bounds(year,month):
     return start,end
 
 def player_attendance_stats(player_id,team_id,year,month):
-    if not team_id:return {"trainings":0,"present":0,"absent":0,"excused":0,"percent":None}
+    if not team_id:return {"trainings":0,"present":0,"absent":0,"percent":None}
     start,end=month_bounds(year,month)
     r=fetchone("""SELECT COUNT(DISTINCT e.id) trainings,
         COUNT(DISTINCT e.id) FILTER(WHERE a.status='present') present,
-        COUNT(DISTINCT e.id) FILTER(WHERE a.status='absent') absent,
-        COUNT(DISTINCT e.id) FILTER(WHERE a.status='excused') excused
+        COUNT(DISTINCT e.id) FILTER(WHERE a.status='absent') absent
         FROM events e LEFT JOIN attendance a ON a.event_id=e.id AND a.player_id=%s AND a.academy_id=%s
         WHERE e.academy_id=%s AND e.team_id=%s AND e.event_type='training'
         AND e.starts_at >= %s AND e.starts_at < %s AND e.status <> 'cancelled'""",
         (player_id,ACADEMY_ID,ACADEMY_ID,team_id,start,end)) or {}
     total=int(r.get("trainings") or 0);present=int(r.get("present") or 0)
-    return {"trainings":total,"present":present,"absent":int(r.get("absent") or 0),"excused":int(r.get("excused") or 0),"percent":present/total*100 if total else None}
+    return {"trainings":total,"present":present,"absent":int(r.get("absent") or 0),"percent":present/total*100 if total else None}
 
 def render_attendance_stats(player_id,team_id,year,month):
     a=player_attendance_stats(player_id,team_id,year,month);st.markdown("#### 📅 Автоматична посещаемост")
     if not a["trainings"]:st.info("За избрания месец все още няма достатъчно данни за проведени тренировки.");return
-    c=st.columns(5);c[0].metric("Тренировки",a["trainings"]);c[1].metric("Присъствия",a["present"]);c[2].metric("Отсъствия",a["absent"]);c[3].metric("Извинени",a["excused"]);c[4].metric("Посещаемост",f"{a['percent']:.1f}%")
+    c=st.columns(4);c[0].metric("Тренировки",a["trainings"]);c[1].metric("Присъствия",a["present"]);c[2].metric("Отсъствия",a["absent"]);c[3].metric("Посещаемост",f"{a['percent']:.1f}%")
 
 def render_parent_player_development(user,child):
     rows=fetchall("""SELECT pe.* FROM player_evaluations pe JOIN parent_players pp ON pp.player_id=pe.player_id
@@ -1442,7 +1587,7 @@ def coach_player_statistics(user,team):
         WHERE pe.academy_id=%s AND pe.player_id=%s AND pe.team_id=%s AND pe.evaluation_year=%s AND pe.evaluation_month=%s AND c.user_id=%s AND c.active""",(ACADEMY_ID,player["id"],team["id"],year,month,user["id"]))
     if old:st.info("За този месец има запазена оценка. Промените ще обновят съществуващия запис.")
     criteria=[("⚽ Техника","technique"),("🧠 Тактика","tactics"),("🏃 Физическа подготовка","physical"),("🤝 Работа в екип","teamwork"),("💪 Дисциплина","discipline"),("⭐ Старание / отношение към тренировките","effort")];vals={}
-    for label,field in criteria:vals[field]=st.select_slider(label,options=[1,2,3,4,5],value=int(old[field]) if old else 3,format_func=star_rating,key=f"eval_{field}_{team['id']}_{player['id']}_{year}_{month}")
+    for label,field in criteria:vals[field]=st.radio(label,options=[1,2,3,4,5],index=(int(old[field])-1) if old else 2,format_func=lambda x:f"{x} ★",horizontal=True,key=f"eval_{field}_{team['id']}_{player['id']}_{year}_{month}")
     note=st.text_area("📝 Бележка от треньора",value=(old.get("coach_note") or "") if old else "",key=f"eval_note_{team['id']}_{player['id']}_{year}_{month}")
     score=sum(vals.values())/6;st.markdown(f"### Общо развитие: {score:.1f} / 5");st.write(f"**{evaluation_status(score)}**");st.caption("Статусът показва развитието за периода, а не определя детето като добър или слаб футболист.");render_attendance_stats(player["id"],team["id"],year,month)
     if st.button("💾 Запази месечната оценка",key=f"save_eval_{team['id']}_{player['id']}_{year}_{month}",use_container_width=True,type="primary"):
@@ -1854,6 +1999,10 @@ def parent_panel(user):
             with st.container(border=True): st.subheader(r["title"]); st.write(r["body"]); st.caption(r["created_at"].strftime("%d.%m.%Y %H:%M"))
         if not rows: st.info("Няма съобщения.")
     elif page=="Такси":
+        finance_view=st.radio("Такси и плащания",["💰 Месечни такси","🛍️ Екипировка / аксесоари"],horizontal=True,key=f"parent_finance_view_{child['id']}",label_visibility="collapsed")
+        if finance_view=="🛍️ Екипировка / аксесоари":
+            product_catalog_parent(user,child)
+            return
         rows=fetchall("SELECT * FROM player_fees WHERE academy_id=%s AND player_id=%s ORDER BY fee_year DESC,fee_month DESC",(ACADEMY_ID,child["id"]))
         for r in rows:
             paid=r["status"]=="paid"
@@ -2202,7 +2351,7 @@ def admin_panel(user):
         with st.expander(f"🔔 {count} нови известия", expanded=False):
             notification_center(user)
     sections = ["Табло", "Регистрации", "Деца и групи", "Треньори и набори", "Роли и права",
-                "Тренировки и мачове", "Съобщения", "Такси", "Информация"]
+                "Тренировки и мачове", "Управление тренировки", "Съобщения", "Финанси", "Информация"]
     sec = st.sidebar.radio("Админ меню", sections)
 
     if sec == "Табло":
@@ -2444,6 +2593,8 @@ def admin_panel(user):
         teams = fetchall("SELECT * FROM teams WHERE academy_id=%s AND active ORDER BY birth_year", (ACADEMY_ID,))
         multi_date_event_form("admin_event_form", teams, user["id"])
 
+    elif sec == "Управление тренировки":
+        admin_training_resources(user)
     elif sec == "Съобщения":
         teams = fetchall("SELECT * FROM teams WHERE academy_id=%s AND active ORDER BY birth_year", (ACADEMY_ID,)); tmap = {t["name"]: t["id"] for t in teams}
         with st.form("msg_form"):
@@ -2464,14 +2615,16 @@ def admin_panel(user):
                     st.rerun()
         if not rows: st.info("Архивът е празен.")
 
-    elif sec == "Такси":
+    elif sec == "Финанси":
         st.session_state.setdefault("admin_fee_page", "Начисляване")
-        b1,b2,b3=st.columns(3)
+        b1,b2,b3,b4=st.columns(4)
         if b1.button("💰 Начисляване",use_container_width=True,type="primary" if st.session_state.admin_fee_page=="Начисляване" else "secondary"):
             st.session_state.admin_fee_page="Начисляване"; st.rerun()
         if b2.button("📊 Справка и плащания",use_container_width=True,type="primary" if st.session_state.admin_fee_page=="Справка" else "secondary"):
             st.session_state.admin_fee_page="Справка"; st.rerun()
-        if b3.button("🧾 Разход",use_container_width=True,type="primary" if st.session_state.admin_fee_page=="Разход" else "secondary"):
+        if b3.button("🛍️ Екипировка / аксесоари",use_container_width=True,type="primary" if st.session_state.admin_fee_page=="Екипировка" else "secondary"):
+            st.session_state.admin_fee_page="Екипировка"; st.rerun()
+        if b4.button("🧾 Разход",use_container_width=True,type="primary" if st.session_state.admin_fee_page=="Разход" else "secondary"):
             st.session_state.admin_fee_page="Разход"; st.rerun()
 
         fee_page=st.session_state.admin_fee_page
@@ -2496,6 +2649,17 @@ def admin_panel(user):
             expense_panel(user)
 
     elif sec == "Информация":
+        st.subheader("📨 Съобщение до треньор")
+        coach_users=fetchall("SELECT c.display_name,u.id user_id FROM coaches c JOIN users u ON u.id=c.user_id WHERE c.academy_id=%s AND c.active AND u.active ORDER BY c.display_name",(ACADEMY_ID,))
+        if coach_users:
+            cmap={c['display_name']:c['user_id'] for c in coach_users}
+            with st.form("admin_to_coach_message",clear_on_submit=True):
+                cname=st.selectbox("Треньор",list(cmap));subject=st.text_input("Тема");body=st.text_area("Съобщение");send=st.form_submit_button("Изпрати в Обратна връзка",use_container_width=True)
+            if send and subject.strip() and body.strip():
+                execute("INSERT INTO coach_inbox_messages(academy_id,coach_user_id,admin_user_id,subject,body) VALUES(%s,%s,%s,%s,%s)",(ACADEMY_ID,cmap[cname],user['id'],subject.strip(),body.strip()))
+                create_notification(cmap[cname],"admin_feedback","Ново съобщение от Admin",subject.strip());set_flash("✅ Съобщението е изпратено до треньора.");st.rerun()
+        else: st.info("Няма активни треньорски профили.")
+        st.divider()
         st.subheader("🎬 Видео инструкция за родители")
         current_help_video=academy().get("parent_help_video_url") or ""
         help_video_url=st.text_input("Линк към видео инструкция",value=current_help_video,key="parent_help_video_url")
@@ -2547,7 +2711,7 @@ def coach_panel(user):
         st.info("Няма възложени набори към този треньор.")
         return
     st.sidebar.caption(coach["display_name"])
-    sections = ["Табло", "Тренировки и мачове", "Група за мача", "Присъствие", "Такси", "Съобщения", "Обратна връзка"]
+    sections = ["Табло", "Тренировки и мачове", "Упражнения", "Група за мача", "Присъствие", "Такси", "Съобщения", "Обратна връзка"]
     sec = st.sidebar.radio("Треньорско меню", sections)
     tmap = {t["name"]: t for t in teams}
     team_name = st.selectbox("Набор", list(tmap), key="coach_selected_team")
@@ -2563,6 +2727,8 @@ def coach_panel(user):
         if not players: st.info("Няма потвърдени деца в този набор.")
     elif sec == "Тренировки и мачове":
         multi_date_event_form("coach_event_form", teams, user["id"], fixed_team_id=team["id"])
+    elif sec == "Упражнения":
+        coach_exercises_panel()
     elif sec == "Група за мача":
         squad_section=st.radio("Избор",["⚽ Група за мача","🧩 Match Day","📊 Статистика","🏆 Резултати"],horizontal=True,key=f"coach_squad_inner_{team['id']}",label_visibility="collapsed")
         if squad_section == "⚽ Група за мача":
@@ -2650,7 +2816,7 @@ def coach_panel(user):
             with st.form("attendance_form"):
                 marks = {}
                 for player in players:
-                    marks[player["id"]] = st.selectbox(f"{player['first_name']} {player['last_name']}", ["present","absent","excused"], format_func=lambda x:{"present":"Присъства","absent":"Отсъства","excused":"Извинен"}[x], key=f"att_{event['id']}_{player['id']}")
+                    marks[player["id"]] = st.selectbox(f"{player['first_name']} {player['last_name']}", ["present","absent"], format_func=lambda x:{"present":"Присъства","absent":"Отсъства"}[x], key=f"att_{event['id']}_{player['id']}")
                 saved = st.form_submit_button("Запази присъствието", use_container_width=True)
             if saved:
                 for player_id,status in marks.items():
@@ -2678,6 +2844,12 @@ def coach_panel(user):
                     st.rerun()
 
     elif sec == "Обратна връзка":
+        st.subheader("📨 Съобщения от Admin")
+        admin_messages=fetchall("SELECT * FROM coach_inbox_messages WHERE academy_id=%s AND coach_user_id=%s ORDER BY created_at DESC",(ACADEMY_ID,user['id']))
+        for msg in admin_messages:
+            with st.container(border=True): st.write(f"**{msg['subject']}**");st.write(msg['body']);st.caption(msg['created_at'].strftime('%d.%m.%Y %H:%M'))
+        execute("UPDATE coach_inbox_messages SET is_read=TRUE WHERE academy_id=%s AND coach_user_id=%s",(ACADEMY_ID,user['id']))
+        st.divider()
         st.subheader("📝 Обратна връзка от родители")
         rows = fetchall(
             """SELECT f.*,u.first_name,u.last_name,p.first_name player_first,p.last_name player_last
