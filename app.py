@@ -428,6 +428,14 @@ def init_db():
           active BOOLEAN NOT NULL DEFAULT TRUE, created_by BIGINT REFERENCES users(id) ON DELETE SET NULL,
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""",
       """CREATE INDEX IF NOT EXISTS idx_shop_products_active ON shop_products(academy_id,active,category,name)""",
+      """CREATE TABLE IF NOT EXISTS shop_product_variants(
+          id BIGSERIAL PRIMARY KEY, academy_id BIGINT NOT NULL REFERENCES academies(id) ON DELETE CASCADE,
+          product_id BIGINT NOT NULL REFERENCES shop_products(id) ON DELETE CASCADE,
+          model_name TEXT NOT NULL DEFAULT 'Стандартен модел', size_name TEXT NOT NULL DEFAULT 'Универсален',
+          sku TEXT, quantity INTEGER NOT NULL DEFAULT 0 CHECK(quantity>=0), min_quantity INTEGER NOT NULL DEFAULT 0 CHECK(min_quantity>=0),
+          active BOOLEAN NOT NULL DEFAULT TRUE, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          UNIQUE(product_id,model_name,size_name))""",
+      """ALTER TABLE shop_orders ADD COLUMN IF NOT EXISTS variant_id BIGINT REFERENCES shop_product_variants(id) ON DELETE SET NULL""",
       """CREATE TABLE IF NOT EXISTS shop_orders(
           id BIGSERIAL PRIMARY KEY, academy_id BIGINT NOT NULL REFERENCES academies(id) ON DELETE CASCADE,
           product_id BIGINT NOT NULL REFERENCES shop_products(id) ON DELETE RESTRICT,
@@ -1296,7 +1304,7 @@ def expense_panel(user):
     st.subheader("Нов разход")
     with st.form("expense_form", clear_on_submit=True):
         expense_date=st.date_input("Дата",date.today())
-        category=st.selectbox("Категория",["Наем","Консумативи","Други"])
+        category=st.selectbox("Категория",["Наем","Консумативи","Топки","Спортна екипировка","Тренировъчни пособия","Транспорт","Турнири и такси","Реклама","Други"])
         amount=st.number_input("Сума (€)",0.0,1000000.0,0.0,0.01)
         payment_method=st.selectbox("Начин",["cash","bank","card"],format_func=lambda x:{"cash":"В брой","bank":"По банка","card":"Карта"}[x])
         description=st.text_area("Описание")
@@ -1326,83 +1334,132 @@ def expense_panel(user):
 
 def product_catalog_parent(user,child):
     st.subheader("🛍️ Екипировка / аксесоари")
+    st.caption("Избери артикул, модел, размер и количество. Виждат се само публикувани артикули с налични бройки.")
     rows=fetchall("SELECT * FROM shop_products WHERE academy_id=%s AND active ORDER BY category,name",(ACADEMY_ID,))
-    if not rows: st.info("В момента няма публикувани артикули."); return
+    visible_count=0
     for item in rows:
+        variants=fetchall("SELECT * FROM shop_product_variants WHERE academy_id=%s AND product_id=%s AND active AND quantity>0 ORDER BY model_name,size_name",(ACADEMY_ID,item['id']))
+        if not variants:
+            continue
+        visible_count+=1
         with st.container(border=True):
-            a,b=st.columns([1,3])
-            with a:
-                if item.get("image_data"): st.image(bytes(item["image_data"]),use_container_width=True)
-            with b:
-                st.markdown(f"### {item['name']} · {item['price']:.2f} €")
-                st.caption(f"{item['category']} · Налични: {item['stock_quantity']}")
-                if item.get("description"): st.write(item["description"])
-                if item.get("size_info"): st.write(f"Размери/варианти: {item['size_info']}")
-                qty=st.number_input("Количество",1,max(1,int(item['stock_quantity'])),1,key=f"shop_qty_{child['id']}_{item['id']}",disabled=item['stock_quantity']<=0)
-                size=st.text_input("Избран размер/вариант",key=f"shop_size_{child['id']}_{item['id']}")
-                method=st.radio("Плащане",["bank","card"],format_func=lambda x:{"bank":"🏦 По банка","card":"💳 С карта"}[x],horizontal=True,key=f"shop_method_{child['id']}_{item['id']}")
-                note=st.text_input("Бележка към поръчката",key=f"shop_note_{child['id']}_{item['id']}")
-                if st.button("Поръчай",key=f"shop_order_{child['id']}_{item['id']}",use_container_width=True,disabled=item['stock_quantity']<=0):
-                    execute("""INSERT INTO shop_orders(academy_id,product_id,parent_user_id,player_id,quantity,unit_price,selected_size,payment_method,parent_note) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)""",(ACADEMY_ID,item['id'],user['id'],child['id'],qty,item['price'],size.strip() or None,method,note.strip() or None))
-                    notify_admins("shop_order","Нова поръчка за екипировка",f"{child['first_name']} {child['last_name']} · {item['name']} · {qty} бр.")
-                    set_flash("✅ Поръчката е изпратена. Следи статуса и коментара от академията.");st.rerun()
-    st.markdown("### Моите поръчки")
-    orders=fetchall("""SELECT o.*,p.name product_name FROM shop_orders o JOIN shop_products p ON p.id=o.product_id WHERE o.academy_id=%s AND o.parent_user_id=%s AND o.player_id=%s ORDER BY o.created_at DESC""",(ACADEMY_ID,user['id'],child['id']))
+            photo,info=st.columns([1,3])
+            with photo:
+                if item.get('image_data'): st.image(bytes(item['image_data']),use_container_width=True)
+                else: st.info("Няма снимка")
+            with info:
+                st.markdown(f"### {item['name']}")
+                st.markdown(f"## {item['price']:.2f} €")
+                st.caption(item['category'])
+                if item.get('description'): st.write(item['description'])
+                variant_map={f"{v['model_name']} · размер {v['size_name']} · налични {v['quantity']}":v for v in variants}
+                selected_label=st.selectbox("Модел и размер",list(variant_map),key=f"shop_variant_{child['id']}_{item['id']}")
+                variant=variant_map[selected_label]
+                qty=st.number_input("Количество",1,int(variant['quantity']),1,key=f"shop_qty_{child['id']}_{item['id']}_{variant['id']}")
+                method=st.radio("Начин на плащане",["bank","card"],format_func=lambda x:{"bank":"🏦 По банка","card":"💳 С карта"}[x],horizontal=True,key=f"shop_method_{child['id']}_{item['id']}")
+                note=st.text_input("Бележка към поръчката",placeholder="Например име за надпис или уточнение",key=f"shop_note_{child['id']}_{item['id']}")
+                if st.button("🛒 Поръчай избрания артикул",key=f"shop_order_{child['id']}_{item['id']}",use_container_width=True,type="primary"):
+                    execute("""INSERT INTO shop_orders(academy_id,product_id,variant_id,parent_user_id,player_id,quantity,unit_price,selected_size,payment_method,parent_note)
+                               VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                            (ACADEMY_ID,item['id'],variant['id'],user['id'],child['id'],qty,item['price'],f"{variant['model_name']} / {variant['size_name']}",method,note.strip() or None))
+                    notify_admins("shop_order","Нова поръчка за екипировка",f"{child['first_name']} {child['last_name']} · {item['name']} · {variant['model_name']} / {variant['size_name']} · {qty} бр.")
+                    set_flash("✅ Поръчката е изпратена. Очаквай статус и съобщение от академията.");st.rerun()
+    if not visible_count: st.info("В момента няма публикувани артикули с налични размери.")
+    st.divider();st.markdown("### Моите поръчки")
+    orders=fetchall("""SELECT o.*,p.name product_name FROM shop_orders o JOIN shop_products p ON p.id=o.product_id
+                       WHERE o.academy_id=%s AND o.parent_user_id=%s AND o.player_id=%s ORDER BY o.created_at DESC""",(ACADEMY_ID,user['id'],child['id']))
     for o in orders:
-        labels={"pending":"Чака потвърждение","paid":"Платено","rejected":"Отказано"}; fulfil={"new":"Нова","available":"Има наличност","ordered":"Ще бъде поръчано","ready":"Готово за получаване","delivered":"Получено","cancelled":"Отказано"}
-        with st.expander(f"{o['product_name']} · {o['unit_price']*o['quantity']:.2f} € · {labels.get(o['payment_status'],o['payment_status'])}"):
+        labels={"pending":"Чака потвърждение","paid":"Платено","rejected":"Отказано"}
+        fulfil={"new":"Нова поръчка","available":"Има наличност","ordered":"Поръчано от доставчик","ready":"Готово за получаване","delivered":"Получено","cancelled":"Отказано"}
+        with st.expander(f"{o['product_name']} · {o.get('selected_size') or ''} · {o['unit_price']*o['quantity']:.2f} € · {labels.get(o['payment_status'],o['payment_status'])}"):
+            st.write(f"Количество: **{o['quantity']}**")
             st.write(f"Статус: **{fulfil.get(o['fulfilment_status'],o['fulfilment_status'])}**")
             if o.get('admin_comment'): st.info(f"Съобщение от академията: {o['admin_comment']}")
 
+
 def admin_shop_panel(user):
     st.subheader("🛍️ Екипировка / аксесоари")
-    catalog,orders,club=st.tabs(["Асортимент за родители","Поръчки и плащания","Клубен инвентар"])
+    st.info("Този модул е онлайн магазинът за родители и складовата наличност. Разходите се въвеждат само от отделния бутон „Разход“.")
+    catalog,stock,orders,club=st.tabs(["🖼️ Витрина за родители","📦 Модели, размери и наличност","🧾 Поръчки","🏟️ Клубен асортимент"])
     with catalog:
+        st.caption("Тук определяш какво родителите виждат в магазина: снимка, име, описание и продажна цена.")
         with st.form("new_shop_product",clear_on_submit=True):
-            c1,c2=st.columns(2); name=c1.text_input("Артикул");category=c2.selectbox("Категория",["Екипировка","Аксесоар","Облекло","Друго"])
-            description=st.text_area("Информация/описание"); c3,c4,c5=st.columns(3); price=c3.number_input("Цена €",0.0,10000.0,0.0,.01); stock=c4.number_input("Наличност",0,100000,0); minimum=c5.number_input("Минимална наличност",0,100000,0)
-            size_info=st.text_input("Размери/варианти"); image=st.file_uploader("Снимка",type=["jpg","jpeg","png","webp"]); save=st.form_submit_button("Добави артикул",use_container_width=True)
+            c1,c2=st.columns(2);name=c1.text_input("Име на артикула");category=c2.selectbox("Категория",["Екипировка","Аксесоар","Облекло","Фен артикули","Друго"])
+            description=st.text_area("Описание за родителския панел");price=st.number_input("Продажна цена (€)",0.0,10000.0,0.0,.01)
+            image=st.file_uploader("Основна снимка",type=["jpg","jpeg","png","webp"]);published=st.checkbox("Публикувай за родители",True)
+            save=st.form_submit_button("Добави във витрината",use_container_width=True)
         if save:
-            if not name.strip() or price<=0: st.error("Въведи име и цена над 0.")
+            if not name.strip() or price<=0: st.error("Въведи име и продажна цена над 0.")
             else:
-                execute("""INSERT INTO shop_products(academy_id,name,category,description,price,size_info,stock_quantity,min_stock,image_data,image_mime,created_by) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",(ACADEMY_ID,name.strip(),category,description.strip() or None,price,size_info.strip() or None,stock,minimum,image.getvalue() if image else None,image.type if image else None,user['id']))
-                set_flash("✅ Артикулът е добавен.");st.rerun()
+                execute("""INSERT INTO shop_products(academy_id,name,category,description,price,stock_quantity,min_stock,image_data,image_mime,active,created_by)
+                           VALUES(%s,%s,%s,%s,%s,0,0,%s,%s,%s,%s)""",(ACADEMY_ID,name.strip(),category,description.strip() or None,price,image.getvalue() if image else None,image.type if image else None,published,user['id']))
+                set_flash("✅ Артикулът е добавен. Добави моделите, размерите и бройките от следващия под-бутон.");st.rerun()
         products=fetchall("SELECT * FROM shop_products WHERE academy_id=%s ORDER BY active DESC,category,name",(ACADEMY_ID,))
         for x in products:
-            with st.expander(f"{x['name']} · {x['price']:.2f} € · налични {x['stock_quantity']}"):
-                q=st.number_input("Нова наличност",0,100000,int(x['stock_quantity']),key=f"stock_{x['id']}"); active=st.checkbox("Видим за родители",x['active'],key=f"product_active_{x['id']}")
-                if q<=x['min_stock']: st.warning("Наличността е на или под минималния праг.")
-                if st.button("Запази",key=f"save_product_{x['id']}"): execute("UPDATE shop_products SET stock_quantity=%s,active=%s,updated_at=NOW() WHERE id=%s AND academy_id=%s",(q,active,x['id'],ACADEMY_ID));st.rerun()
+            with st.expander(f"{'🟢' if x['active'] else '⚪'} {x['name']} · {x['price']:.2f} €"):
+                c1,c2=st.columns(2);price_edit=c1.number_input("Цена (€)",0.0,10000.0,float(x['price']),.01,key=f"product_price_{x['id']}");active=c2.checkbox("Видим за родители",x['active'],key=f"product_active_{x['id']}")
+                description_edit=st.text_area("Описание",value=x.get('description') or '',key=f"product_desc_{x['id']}")
+                if st.button("Запази витрината",key=f"save_product_{x['id']}",use_container_width=True):
+                    execute("UPDATE shop_products SET price=%s,description=%s,active=%s,updated_at=NOW() WHERE id=%s AND academy_id=%s",(price_edit,description_edit.strip() or None,active,x['id'],ACADEMY_ID));st.rerun()
+    with stock:
+        products=fetchall("SELECT * FROM shop_products WHERE academy_id=%s ORDER BY category,name",(ACADEMY_ID,))
+        if not products: st.info("Първо добави артикул във витрината.")
+        else:
+            pmap={f"{p['name']} · {p['price']:.2f} €":p for p in products};product=pmap[st.selectbox("Артикул",list(pmap),key="variant_product")]
+            with st.form(f"add_variant_{product['id']}",clear_on_submit=True):
+                a,b,c,d=st.columns(4);model=a.text_input("Модел",placeholder="Напр. Home 2026");size=b.text_input("Размер",placeholder="128, S, M, 5...");sku=c.text_input("Код/SKU");qty=d.number_input("Бройки",0,100000,0)
+                minimum=st.number_input("Минимална наличност за предупреждение",0,100000,0);add=st.form_submit_button("Добави модел/размер",use_container_width=True)
+            if add and model.strip() and size.strip():
+                execute("""INSERT INTO shop_product_variants(academy_id,product_id,model_name,size_name,sku,quantity,min_quantity)
+                           VALUES(%s,%s,%s,%s,%s,%s,%s)
+                           ON CONFLICT(product_id,model_name,size_name) DO UPDATE SET sku=EXCLUDED.sku,quantity=EXCLUDED.quantity,min_quantity=EXCLUDED.min_quantity,active=TRUE,updated_at=NOW()""",(ACADEMY_ID,product['id'],model.strip(),size.strip(),sku.strip() or None,qty,minimum));st.rerun()
+            availability=st.radio("Филтър наличност",["Всички","Налични","Изчерпани","Под минималната наличност"],horizontal=True)
+            variants=fetchall("SELECT * FROM shop_product_variants WHERE academy_id=%s AND product_id=%s ORDER BY model_name,size_name",(ACADEMY_ID,product['id']))
+            for v in variants:
+                if availability=="Налични" and v['quantity']<=0: continue
+                if availability=="Изчерпани" and v['quantity']!=0: continue
+                if availability=="Под минималната наличност" and v['quantity']>v['min_quantity']: continue
+                with st.container(border=True):
+                    a,b,c,d=st.columns([3,2,2,1]);a.write(f"**{v['model_name']}** · размер **{v['size_name']}**");new_qty=b.number_input("Бройки",0,100000,int(v['quantity']),key=f"variant_qty_{v['id']}");new_min=c.number_input("Минимум",0,100000,int(v['min_quantity']),key=f"variant_min_{v['id']}");active=d.checkbox("Активен",v['active'],key=f"variant_active_{v['id']}")
+                    if new_qty<=new_min: st.warning("Този модел/размер е за зареждане.")
+                    if st.button("Запази наличността",key=f"save_variant_{v['id']}",use_container_width=True):execute("UPDATE shop_product_variants SET quantity=%s,min_quantity=%s,active=%s,updated_at=NOW() WHERE id=%s AND academy_id=%s",(new_qty,new_min,active,v['id'],ACADEMY_ID));st.rerun()
     with orders:
-        flt=st.selectbox("Филтър",["Всички","Чакащи","Платени","За доставка","Готови","Приключени"])
-        all_orders=fetchall("""SELECT o.*,p.name product_name,u.first_name,u.last_name,pl.first_name player_first,pl.last_name player_last FROM shop_orders o JOIN shop_products p ON p.id=o.product_id JOIN users u ON u.id=o.parent_user_id JOIN players pl ON pl.id=o.player_id WHERE o.academy_id=%s ORDER BY o.created_at DESC""",(ACADEMY_ID,))
+        flt=st.selectbox("Филтър",["Всички","Чакащи плащане","Платени","За поръчване","Готови","Приключени"])
+        all_orders=fetchall("""SELECT o.*,p.name product_name,u.first_name,u.last_name,pl.first_name player_first,pl.last_name player_last
+                              FROM shop_orders o JOIN shop_products p ON p.id=o.product_id JOIN users u ON u.id=o.parent_user_id JOIN players pl ON pl.id=o.player_id
+                              WHERE o.academy_id=%s ORDER BY o.created_at DESC""",(ACADEMY_ID,))
         for o in all_orders:
-            if flt=="Чакащи" and o['payment_status']!='pending': continue
-            if flt=="Платени" and o['payment_status']!='paid': continue
-            if flt=="За доставка" and o['fulfilment_status'] not in ('new','ordered'): continue
-            if flt=="Готови" and o['fulfilment_status']!='ready': continue
-            if flt=="Приключени" and o['fulfilment_status'] not in ('delivered','cancelled'): continue
-            with st.expander(f"{o['product_name']} · {o['player_first']} {o['player_last']} · {o['unit_price']*o['quantity']:.2f} €"):
-                pay=st.selectbox("Плащане",["pending","paid","rejected"],index=["pending","paid","rejected"].index(o['payment_status']),key=f"order_pay_{o['id']}")
-                fulfil=st.selectbox("Изпълнение",["new","available","ordered","ready","delivered","cancelled"],index=["new","available","ordered","ready","delivered","cancelled"].index(o['fulfilment_status']),format_func=lambda x:{"new":"Нова","available":"Има наличност","ordered":"Ще бъде поръчано","ready":"Готово за получаване","delivered":"Получено","cancelled":"Отказано"}[x],key=f"order_fulfil_{o['id']}")
+            if flt=="Чакащи плащане" and o['payment_status']!='pending':continue
+            if flt=="Платени" and o['payment_status']!='paid':continue
+            if flt=="За поръчване" and o['fulfilment_status'] not in ('new','ordered'):continue
+            if flt=="Готови" and o['fulfilment_status']!='ready':continue
+            if flt=="Приключени" and o['fulfilment_status'] not in ('delivered','cancelled'):continue
+            with st.expander(f"{o['product_name']} · {o.get('selected_size') or ''} · {o['player_first']} {o['player_last']} · {o['unit_price']*o['quantity']:.2f} €"):
+                pay=st.selectbox("Плащане",["pending","paid","rejected"],index=["pending","paid","rejected"].index(o['payment_status']),format_func=lambda x:{"pending":"Чака потвърждение","paid":"Платено","rejected":"Отказано"}[x],key=f"order_pay_{o['id']}")
+                fulfil=st.selectbox("Изпълнение",["new","available","ordered","ready","delivered","cancelled"],index=["new","available","ordered","ready","delivered","cancelled"].index(o['fulfilment_status']),format_func=lambda x:{"new":"Нова","available":"Има наличност","ordered":"Поръчано от доставчик","ready":"Готово за получаване","delivered":"Получено","cancelled":"Отказано"}[x],key=f"order_fulfil_{o['id']}")
                 comment=st.text_area("Съобщение към родителя",value=o.get('admin_comment') or '',key=f"order_comment_{o['id']}")
                 if st.button("Потвърди и изпрати статуса",key=f"save_order_{o['id']}",use_container_width=True):
                     was_paid=o['payment_status']=='paid'
                     with db() as conn,conn.cursor() as cur:
                         cur.execute("UPDATE shop_orders SET payment_status=%s,fulfilment_status=%s,admin_comment=%s,confirmed_by=%s,paid_at=CASE WHEN %s='paid' THEN COALESCE(paid_at,NOW()) ELSE NULL END,updated_at=NOW() WHERE id=%s AND academy_id=%s",(pay,fulfil,comment.strip() or None,user['id'],pay,o['id'],ACADEMY_ID))
-                        if pay=='paid' and not was_paid: cur.execute("UPDATE shop_products SET stock_quantity=GREATEST(0,stock_quantity-%s),updated_at=NOW() WHERE id=%s AND academy_id=%s",(o['quantity'],o['product_id'],ACADEMY_ID))
-                    create_notification(o['parent_user_id'],"shop_order_status",f"Обновена поръчка: {o['product_name']}",comment.strip() or "Провери новия статус на поръчката.")
-                    set_flash("✅ Статусът е записан и родителят е уведомен.");st.rerun()
+                        if pay=='paid' and not was_paid and o.get('variant_id'):cur.execute("UPDATE shop_product_variants SET quantity=GREATEST(0,quantity-%s),updated_at=NOW() WHERE id=%s AND academy_id=%s",(o['quantity'],o['variant_id'],ACADEMY_ID))
+                    create_notification(o['parent_user_id'],"shop_order_status",f"Обновена поръчка: {o['product_name']}",comment.strip() or "Провери новия статус на поръчката.");set_flash("✅ Статусът е записан и родителят е уведомен.");st.rerun()
     with club:
+        st.caption("Вътрешна наличност на клуба. Тези артикули не се показват и не се продават на родителите.")
         with st.form("club_inventory_add",clear_on_submit=True):
-            a,b,c=st.columns(3);item=a.text_input("Артикул");cat=b.selectbox("Тип",["Топки","Шапки","Чували","Тренировъчни пособия","Друго"]);qty=c.number_input("Количество",0,100000,0)
-            condition=st.selectbox("Състояние",["new","good","worn","damaged","retired"],format_func=lambda x:{"new":"Ново","good":"Добро","worn":"Амортизирано","damaged":"Повредено","retired":"Бракувано"}[x]);note=st.text_input("Бележка");add=st.form_submit_button("Добави към клубния инвентар",use_container_width=True)
-        if add and item.strip(): execute("INSERT INTO club_inventory(academy_id,item_name,category,quantity,condition_status,note,created_by) VALUES(%s,%s,%s,%s,%s,%s,%s)",(ACADEMY_ID,item.strip(),cat,qty,condition,note.strip() or None,user['id']));st.rerun()
-        status=st.selectbox("Филтър по състояние",["Всички","new","good","worn","damaged","retired"])
+            a,b,c=st.columns(3);item=a.text_input("Артикул");cat=b.selectbox("Тип",["Топки","Шапки","Чували","Конуси","Екипи за тренировка","Тренировъчни пособия","Друго"]);qty=c.number_input("Количество",0,100000,0)
+            condition=st.selectbox("Състояние",["new","good","worn","damaged","retired"],format_func=lambda x:{"new":"Ново","good":"Добро","worn":"Амортизирано","damaged":"Повредено","retired":"Бракувано"}[x]);note=st.text_input("Бележка");add=st.form_submit_button("Добави към клубния асортимент",use_container_width=True)
+        if add and item.strip():execute("INSERT INTO club_inventory(academy_id,item_name,category,quantity,condition_status,note,created_by) VALUES(%s,%s,%s,%s,%s,%s,%s)",(ACADEMY_ID,item.strip(),cat,qty,condition,note.strip() or None,user['id']));st.rerun()
+        c1,c2=st.columns(2);status=c1.selectbox("Филтър по състояние",["Всички","new","good","worn","damaged","retired"]);stock_filter=c2.selectbox("Филтър по наличност",["Всички","Има наличност","Изчерпани"])
         inv=fetchall("SELECT * FROM club_inventory WHERE academy_id=%s AND active ORDER BY category,item_name",(ACADEMY_ID,))
         for x in inv:
-            if status!="Всички" and x['condition_status']!=status: continue
-            st.write(f"**{x['item_name']}** · {x['category']} · {x['quantity']} бр. · {x['condition_status']}")
+            if status!="Всички" and x['condition_status']!=status:continue
+            if stock_filter=="Има наличност" and x['quantity']<=0:continue
+            if stock_filter=="Изчерпани" and x['quantity']!=0:continue
+            with st.container(border=True):
+                a,b=st.columns([4,1]);a.write(f"**{x['item_name']}** · {x['category']} · {x['condition_status']}");q=b.number_input("Бройки",0,100000,int(x['quantity']),key=f"club_qty_{x['id']}")
+                if st.button("Запази клубната наличност",key=f"save_club_{x['id']}"):execute("UPDATE club_inventory SET quantity=%s,updated_at=NOW() WHERE id=%s AND academy_id=%s",(q,x['id'],ACADEMY_ID));st.rerun()
+
 
 def admin_training_resources(user):
     st.subheader("🎓 Управление тренировки")
