@@ -398,6 +398,7 @@ def init_db():
             away_score INTEGER NOT NULL DEFAULT 0 CHECK(away_score>=0), standings_url TEXT, confirmed BOOLEAN NOT NULL DEFAULT FALSE,
             confirmed_by BIGINT REFERENCES users(id) ON DELETE SET NULL, confirmed_at TIMESTAMPTZ, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             UNIQUE(event_id))""",
+        """ALTER TABLE match_reports ADD COLUMN IF NOT EXISTS outcome TEXT CHECK(outcome IN ('win','draw','loss'))""",
         """CREATE TABLE IF NOT EXISTS match_lineups(
             id BIGSERIAL PRIMARY KEY, academy_id BIGINT NOT NULL REFERENCES academies(id) ON DELETE CASCADE,
             event_id BIGINT NOT NULL REFERENCES events(id) ON DELETE CASCADE, player_id BIGINT NOT NULL REFERENCES players(id) ON DELETE CASCADE,
@@ -1261,7 +1262,11 @@ def payment_panel(user,team_ids=None,fixed_team_id=None):
                         confirm_fee_payment(r["fee_id"],user["id"],"cash",cash_date)
                         set_flash("✅ Плащането в брой е отразено и е включено във финансовата статистика.");st.rerun()
                 elif is_coach:
-                    st.info("🔴 Таксата е дължима. Треньорът може само да следи статуса. За потвърждение в брой е необходима заявка от родителя.")
+                    st.info("🔴 Таксата е дължима. Ако сумата е получена в брой, треньорът може да я отрази директно.")
+                    cash_date=st.date_input("Дата на плащането в брой",date.today(),key=f"coach_direct_cash_date_{r['fee_id']}")
+                    if st.button("💶 Отрази като платено в брой",key=f"coach_direct_cash_{r['fee_id']}",use_container_width=True,type="primary"):
+                        confirm_fee_payment(r["fee_id"],user["id"],"cash",cash_date)
+                        set_flash("✅ Плащането в брой е отразено и се вижда в Admin и Parent панела.");st.rerun()
     st.download_button("📥 Excel: всички набори и деца",payment_excel(payment_rows()),"academy_payments.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True)
 
 
@@ -1371,7 +1376,7 @@ def expense_panel(user):
 
 def product_catalog_parent(user,child):
     st.subheader("🛍️ Екипировка / аксесоари")
-    st.caption("Избери артикул, модел, размер и количество. Виждат се само публикувани артикули с налични бройки.")
+    st.info("ℹ️ Артикулите са само за предварителна информация. Възможността за заявяване и закупуване предстои да бъде активирана.")
     rows=fetchall("SELECT * FROM shop_products WHERE academy_id=%s AND active ORDER BY category,name",(ACADEMY_ID,))
     visible_count=0
     for item in rows:
@@ -1389,29 +1394,12 @@ def product_catalog_parent(user,child):
                 st.markdown(f"## {item['price']:.2f} €")
                 st.caption(item['category'])
                 if item.get('description'): st.write(item['description'])
-                variant_map={f"{v['model_name']} · размер {v['size_name']} · налични {v['quantity']}":v for v in variants}
-                selected_label=st.selectbox("Модел и размер",list(variant_map),key=f"shop_variant_{child['id']}_{item['id']}")
-                variant=variant_map[selected_label]
-                qty=st.number_input("Количество",1,int(variant['quantity']),1,key=f"shop_qty_{child['id']}_{item['id']}_{variant['id']}")
-                method=st.radio("Начин на плащане",["bank","card"],format_func=lambda x:{"bank":"🏦 По банка","card":"💳 С карта"}[x],horizontal=True,key=f"shop_method_{child['id']}_{item['id']}")
-                note=st.text_input("Бележка към поръчката",placeholder="Например име за надпис или уточнение",key=f"shop_note_{child['id']}_{item['id']}")
-                if st.button("🛒 Поръчай избрания артикул",key=f"shop_order_{child['id']}_{item['id']}",use_container_width=True,type="primary"):
-                    execute("""INSERT INTO shop_orders(academy_id,product_id,variant_id,parent_user_id,player_id,quantity,unit_price,selected_size,payment_method,parent_note)
-                               VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-                            (ACADEMY_ID,item['id'],variant['id'],user['id'],child['id'],qty,item['price'],f"{variant['model_name']} / {variant['size_name']}",method,note.strip() or None))
-                    notify_admins("shop_order","Нова поръчка за екипировка",f"{child['first_name']} {child['last_name']} · {item['name']} · {variant['model_name']} / {variant['size_name']} · {qty} бр.")
-                    set_flash("✅ Поръчката е изпратена. Очаквай статус и съобщение от академията.");st.rerun()
-    if not visible_count: st.info("В момента няма публикувани артикули с налични размери.")
-    st.divider();st.markdown("### Моите поръчки")
-    orders=fetchall("""SELECT o.*,p.name product_name FROM shop_orders o JOIN shop_products p ON p.id=o.product_id
-                       WHERE o.academy_id=%s AND o.parent_user_id=%s AND o.player_id=%s ORDER BY o.created_at DESC""",(ACADEMY_ID,user['id'],child['id']))
-    for o in orders:
-        labels={"pending":"Чака потвърждение","paid":"Платено","rejected":"Отказано"}
-        fulfil={"new":"Нова поръчка","available":"Има наличност","ordered":"Поръчано от доставчик","ready":"Готово за получаване","delivered":"Получено","cancelled":"Отказано"}
-        with st.expander(f"{o['product_name']} · {o.get('selected_size') or ''} · {o['unit_price']*o['quantity']:.2f} € · {labels.get(o['payment_status'],o['payment_status'])}"):
-            st.write(f"Количество: **{o['quantity']}**")
-            st.write(f"Статус: **{fulfil.get(o['fulfilment_status'],o['fulfilment_status'])}**")
-            if o.get('admin_comment'): st.info(f"Съобщение от академията: {o['admin_comment']}")
+                st.markdown("**Налични модели и размери:**")
+                for variant in variants:
+                    st.write(f"• {variant['model_name']} · размер {variant['size_name']}")
+                st.button("🔒 Предстои да бъде активирано",key=f"shop_coming_{child['id']}_{item['id']}",use_container_width=True,disabled=True)
+    if not visible_count:
+        st.info("В момента няма публикувани артикули с налични размери.")
 
 
 def admin_shop_panel(user):
@@ -1725,26 +1713,6 @@ def match_day_panel(user,team):
     match_map={f"{m['starts_at']:%d.%m.%Y %H:%M} · {m['title']}":m for m in matches}
     match_label=st.selectbox("Избери мач",list(match_map),key=f"matchday_match_{team['id']}")
     match=match_map[match_label]
-    match_attachments=fetchall(
-        "SELECT * FROM event_attachments WHERE academy_id=%s AND event_id=%s ORDER BY created_at DESC",
-        (ACADEMY_ID,match["id"]),
-    )
-    if match_attachments:
-        with st.expander("📎 Файлове към мача",expanded=False):
-            for attachment in match_attachments:
-                mime=(attachment.get("file_mime") or "").lower()
-                if mime.startswith("image/"):
-                    st.image(
-                        bytes(attachment["file_data"]),
-                        caption=attachment["file_name"],
-                        use_container_width=True,
-                    )
-                else:
-                    st.download_button(
-                        attachment["file_name"],bytes(attachment["file_data"]),attachment["file_name"],
-                        attachment.get("file_mime") or "application/octet-stream",
-                        key=f"coach_match_attachment_{match['id']}_{attachment['id']}",
-                    )
     squad=fetchall(
         """SELECT p.* FROM match_squads ms JOIN players p ON p.id=ms.player_id
            WHERE ms.academy_id=%s AND ms.event_id=%s AND ms.squad_status='in_group'
@@ -1798,98 +1766,70 @@ def match_day_panel(user,team):
         "SELECT * FROM match_reports WHERE academy_id=%s AND event_id=%s",
         (ACADEMY_ID,match["id"]),
     ) or {}
-    st.markdown("### 🏆 Резултат от мача")
-
+    st.markdown("### 🏆 Как завърши мачът?")
+    saved_outcome=report.get("outcome")
+    if not saved_outcome and report:
+        saved_outcome="win" if report.get("home_score",0)>report.get("away_score",0) else "draw" if report.get("home_score",0)==report.get("away_score",0) else "loss"
+    outcome_options=["win","draw","loss"]
     with st.form(f"matchday_result_{match['id']}"):
-    
-        saved_opponent = report.get("opponent_name") or ""
-    
-        home_col, away_col = st.columns(2)
-    
-        with home_col:
-            st.markdown("#### 🦁 The Lions")
-    
-            home_score = st.number_input(
-                "Голове на The Lions",
-                min_value=0,
-                max_value=30,
-                value=int(report.get("home_score") or 0),
-                key=f"home_score_{match['id']}",
-                label_visibility="collapsed",
-            )
-    
-        with away_col:
-            opponent = st.text_input(
-                "Име на противника",
-                value=(
-                    ""
-                    if saved_opponent == "Друг отбор"
-                    else saved_opponent
-                ),
-                placeholder="Друг отбор",
-                key=f"opponent_name_{match['id']}",
-                label_visibility="collapsed",
-            )
-    
-            away_score = st.number_input(
-                "Голове на противника",
-                min_value=0,
-                max_value=30,
-                value=int(report.get("away_score") or 0),
-                key=f"away_score_{match['id']}",
-                label_visibility="collapsed",
-            )
-    
-        st.markdown("#### ⚽ Голмайстори")
-        scorer_map={f"{p['first_name']} {p['last_name']}":p for p in squad}
-        selected_scorers=st.multiselect(
-            "Избери голмайстори от групата",
-            list(scorer_map),
-            key=f"scorers_{match['id']}",
+        outcome=st.radio(
+            "Резултат",outcome_options,
+            index=outcome_options.index(saved_outcome) if saved_outcome in outcome_options else 0,
+            format_func=lambda x:{"win":"🟢 ПОБЕДА","draw":"🔵 РАВЕН","loss":"🔴 ЗАГУБА"}[x],
+            horizontal=True,
         )
+        opponent=st.text_input(
+            "Име на противника",
+            value="" if (report.get("opponent_name") or "") == "Друг отбор" else (report.get("opponent_name") or match.get("opponent") or ""),
+            placeholder="Друг отбор",
+        )
+        detailed=st.checkbox(
+            "⚽ Добави точен резултат и голмайстори",
+            value=bool(report and (report.get("home_score",0) or report.get("away_score",0))),
+            help="По желание. Ако отметката не е включена, се записва само Победа, Равен или Загуба.",
+        )
+        home_score=away_score=None
         scorer_goals={}
-        for scorer_name in selected_scorers:
-            scorer_goals[scorer_map[scorer_name]["id"]]=st.number_input(
-                f"Голове · {scorer_name}",1,20,1,
-                key=f"scorer_goals_{match['id']}_{scorer_map[scorer_name]['id']}",
-            )
+        if detailed:
+            home_col,away_col=st.columns(2)
+            home_score=home_col.number_input("Голове на The Lions",0,30,int(report.get("home_score") or 0))
+            away_score=away_col.number_input("Голове на противника",0,30,int(report.get("away_score") or 0))
+            st.markdown("#### ⚽ Голмайстори")
+            scorer_map={f"{p['first_name']} {p['last_name']}":p for p in squad}
+            selected_scorers=st.multiselect("Избери голмайстори от групата",list(scorer_map))
+            for scorer_name in selected_scorers:
+                scorer_goals[scorer_map[scorer_name]["id"]]=st.number_input(f"Голове · {scorer_name}",1,20,1,key=f"scorer_goals_{match['id']}_{scorer_map[scorer_name]['id']}")
         confirm=st.form_submit_button("✅ Приключи мача и изпрати в архива",use_container_width=True,type="primary")
     if confirm:
         if not opponent.strip():
             st.error("Моля, въведи името на другия отбор.")
+        elif detailed and ((home_score>away_score and outcome!='win') or (home_score==away_score and outcome!='draw') or (home_score<away_score and outcome!='loss')):
+            st.error("Точният резултат не съответства на избраната опция Победа / Равен / Загуба.")
         else:
-            execute(
-                """INSERT INTO match_reports(
-                   academy_id,event_id,team_id,opponent_name,home_score,away_score,
-                   standings_url,confirmed,confirmed_by,confirmed_at)
-               VALUES(%s,%s,%s,%s,%s,%s,%s,TRUE,%s,NOW())
-               ON CONFLICT(event_id) DO UPDATE SET
-                   opponent_name=EXCLUDED.opponent_name,home_score=EXCLUDED.home_score,
-                   away_score=EXCLUDED.away_score,standings_url=EXCLUDED.standings_url,
-                   confirmed=TRUE,confirmed_by=EXCLUDED.confirmed_by,
-                   confirmed_at=NOW(),updated_at=NOW()""",
-            (ACADEMY_ID,match["id"],team["id"],opponent.strip() or "Друг отбор",
-             home_score,away_score,team.get("standings_url"),user["id"]),
-            )
+            # При прост режим пазим съвместими технически стойности, без да показваме точен резултат.
+            stored_home,stored_away=(home_score,away_score) if detailed else ({"win":(1,0),"draw":(0,0),"loss":(0,1)}[outcome])
+            execute("""INSERT INTO match_reports(
+                       academy_id,event_id,team_id,opponent_name,home_score,away_score,outcome,
+                       standings_url,confirmed,confirmed_by,confirmed_at)
+                   VALUES(%s,%s,%s,%s,%s,%s,%s,%s,TRUE,%s,NOW())
+                   ON CONFLICT(event_id) DO UPDATE SET
+                       opponent_name=EXCLUDED.opponent_name,home_score=EXCLUDED.home_score,
+                       away_score=EXCLUDED.away_score,outcome=EXCLUDED.outcome,
+                       standings_url=EXCLUDED.standings_url,confirmed=TRUE,
+                       confirmed_by=EXCLUDED.confirmed_by,confirmed_at=NOW(),updated_at=NOW()""",
+                    (ACADEMY_ID,match["id"],team["id"],opponent.strip() or "Друг отбор",stored_home,stored_away,outcome,team.get("standings_url"),user["id"]))
             execute("UPDATE match_player_stats SET goals=0,updated_at=NOW() WHERE academy_id=%s AND event_id=%s",(ACADEMY_ID,match["id"]))
-            for scorer_id,goals in scorer_goals.items():
-                execute(
-                    """INSERT INTO match_player_stats(academy_id,event_id,player_id,goals,updated_by)
-                       VALUES(%s,%s,%s,%s,%s)
-                       ON CONFLICT(event_id,player_id) DO UPDATE SET
-                         goals=EXCLUDED.goals,updated_by=EXCLUDED.updated_by,updated_at=NOW()""",
-                    (ACADEMY_ID,match["id"],scorer_id,goals,user["id"]),
-                  )
-            notify_team_parents(
-            team["id"],"match_result","Публикуван е резултат",
-            f"The Lions {home_score}:{away_score} {opponent.strip() or 'Друг отбор'}",
-            )
-            # След приключване пазим резултата и статистиката, но освобождаваме тежкото файлово съдържание.
-            execute(
-                "DELETE FROM event_attachments WHERE academy_id=%s AND event_id=%s",
-                (ACADEMY_ID,match["id"]),
-            )
-            set_flash("✅ Мачът е приключен. Резултатът е в архива, а качените файлове/снимки са изтрити автоматично, за да не заемат място.")
+            if detailed:
+                for scorer_id,goals in scorer_goals.items():
+                    execute("""INSERT INTO match_player_stats(academy_id,event_id,player_id,goals,updated_by)
+                               VALUES(%s,%s,%s,%s,%s)
+                               ON CONFLICT(event_id,player_id) DO UPDATE SET goals=EXCLUDED.goals,updated_by=EXCLUDED.updated_by,updated_at=NOW()""",
+                            (ACADEMY_ID,match["id"],scorer_id,goals,user["id"]))
+            outcome_label={"win":"Победа","draw":"Равен","loss":"Загуба"}[outcome]
+            detail_text=f" · {home_score}:{away_score}" if detailed else ""
+            notify_team_parents(team["id"],"match_result","Публикуван е резултат",f"{outcome_label}{detail_text} срещу {opponent.strip() or 'Друг отбор'}")
+            execute("DELETE FROM event_attachments WHERE academy_id=%s AND event_id=%s",(ACADEMY_ID,match["id"]))
+            set_flash("✅ Мачът е приключен и е изпратен в архива.")
             st.rerun()
 
 
@@ -2116,32 +2056,20 @@ def parent_panel(user):
                         format_func=lambda x:{"cash":"💶 В брой","bank":"🏦 По банка","card":"💳 С карта"}[x],
                         horizontal=True,key=f"choice_{r['id']}",
                     )
-                    if method in ("bank","cash"):
-                        payment_date=st.date_input(
-                            "Дата на плащането" if method=="cash" else "Дата на банковия превод",
-                            date.today(),key=f"reported_date_{r['id']}_{method}",
-                        )
-                        button_label="📤 Изпрати плащането в брой за потвърждение" if method=="cash" else "📤 Изпрати банковия превод за потвърждение"
-                        if st.button(button_label,key=f"report_payment_{r['id']}_{method}",use_container_width=True):
-                            execute(
-                                """UPDATE player_fees SET payment_method=%s,payment_reported_date=%s,
-                                   bank_transfer_date=%s,payment_note=%s,confirmation_status='pending',
-                                   parent_reported_at=NOW() WHERE id=%s AND academy_id=%s AND status<>'paid'""",
-                                (method,payment_date,payment_date if method=="bank" else None,
-                                 "Заявено от родител",r["id"],ACADEMY_ID),
-                            )
-                            if method=="bank":
-                                notify_admins("bank_payment","Заявен банков превод",f"{child['first_name']} {child['last_name']} · {child.get('team_name') or 'Без набор'} · {payment_date:%d.%m.%Y}")
-                                set_flash("🟠 Банковият превод е изпратен и чака потвърждение от Admin.","warning")
-                            else:
-                                notify_admins("cash_payment","Заявено плащане в брой",f"{child['first_name']} {child['last_name']} · {child.get('team_name') or 'Без набор'} · {payment_date:%d.%m.%Y}")
-                                coach_user=fetchone("SELECT c.user_id FROM teams t JOIN coaches c ON c.id=t.coach_id WHERE t.academy_id=%s AND t.id=%s",(ACADEMY_ID,child.get("team_id"))) if child.get("team_id") else None
-                                if coach_user and coach_user.get("user_id"):
-                                    create_notification(coach_user["user_id"],"cash_payment","Плащане в брой чака потвърждение",f"{child['first_name']} {child['last_name']} · {payment_date:%d.%m.%Y}")
-                                set_flash("🟠 Плащането в брой е изпратено и чака потвърждение от Admin или Coach.","warning")
-                            st.rerun()
+                    if method=="cash":
+                        st.info("💶 Изборът за плащане в брой ще бъде отразен от треньора или Admin след получаване на сумата.")
+                    elif method=="bank":
+                        payment_date=st.date_input("Дата на банковия превод",date.today(),key=f"reported_date_{r['id']}_bank")
+                        if st.button("📤 Изпрати банковия превод за потвърждение",key=f"report_payment_{r['id']}_bank",use_container_width=True):
+                            execute("""UPDATE player_fees SET payment_method='bank',payment_reported_date=%s,
+                                       bank_transfer_date=%s,payment_note=%s,confirmation_status='pending',
+                                       parent_reported_at=NOW() WHERE id=%s AND academy_id=%s AND status<>'paid'""",
+                                    (payment_date,payment_date,"Заявено от родител",r["id"],ACADEMY_ID))
+                            notify_admins("bank_payment","Заявен банков превод",f"{child['first_name']} {child['last_name']} · {child.get('team_name') or 'Без набор'} · {payment_date:%d.%m.%Y}")
+                            set_flash("🟠 Банковият превод е изпратен и чака потвърждение от Admin.","warning");st.rerun()
                     else:
-                        st.info("💳 Картовото плащане ще се отразява автоматично след активиране на платежния оператор. Ръчно потвърждение не е необходимо.")
+                        st.info("🔒 Плащането с карта предстои да бъде активирано.")
+                        st.button("💳 Предстои",key=f"card_coming_{r['id']}",use_container_width=True,disabled=True)
         if not rows: st.info("Няма начислени такси.")
     elif page=="Информация":
         parent_information(user)
@@ -2760,12 +2688,14 @@ def admin_panel(user):
         st.divider()
         st.subheader("🎬 Видео инструкция за родители")
         current_help_video=academy().get("parent_help_video_url") or ""
-        help_video_url=st.text_input("Линк към видео инструкция",value=current_help_video,key="parent_help_video_url")
-        vh1,vh2=st.columns(2)
-        if vh1.button("Запази видео инструкцията",use_container_width=True): execute("UPDATE academies SET parent_help_video_url=%s WHERE id=%s",(help_video_url.strip() or None,ACADEMY_ID)); st.rerun()
-        if vh2.button("Премахни видеото",use_container_width=True): execute("UPDATE academies SET parent_help_video_url=NULL WHERE id=%s",(ACADEMY_ID,)); st.rerun()
+        with st.expander("⚙️ Добавяне или промяна на видеото",expanded=not bool(current_help_video)):
+            help_video_url=st.text_input("Линк към видео инструкция",value=current_help_video,key="parent_help_video_url")
+            vh1,vh2=st.columns(2)
+            if vh1.button("Запази",use_container_width=True): execute("UPDATE academies SET parent_help_video_url=%s WHERE id=%s",(help_video_url.strip() or None,ACADEMY_ID)); st.rerun()
+            if vh2.button("Премахни",use_container_width=True): execute("UPDATE academies SET parent_help_video_url=NULL WHERE id=%s",(ACADEMY_ID,)); st.rerun()
         if current_help_video: st.video(current_help_video)
         st.divider()
+        st.subheader("📢 Информация към родители")
         with st.form("post_form"):
             title=st.text_input("Заглавие"); body=st.text_area("Текст"); typ=st.radio("Медия",["image","video"],format_func=lambda x:"Снимка" if x=="image" else "Видео линк",horizontal=True); url=st.text_input("URL за видео/снимка"); upload=st.file_uploader("Или качи снимка",type=["jpg","jpeg","png","webp"]); add_poll=st.checkbox("📊 Добави глобална анкета"); poll_question=st.text_input("Въпрос на анкетата") if add_poll else ""; send=st.form_submit_button("Добави в информационния архив",use_container_width=True)
         if send and title.strip():
@@ -3029,8 +2959,5 @@ except (psycopg2.OperationalError, psycopg2.InterfaceError):
     st.markdown("## 🔄 Връзката беше прекъсната")
     st.info("Приложението е било неактивно известно време. Моля, рефрешнете страницата, за да продължите.")
     if st.button("🔄 Опитай отново", use_container_width=True, type="primary"):
-        try:
-            pool.clear()
-        except Exception:
-            pass
+        st.cache_resource.clear()
         st.rerun()
