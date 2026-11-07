@@ -1549,7 +1549,7 @@ def login():
             st.rerun()
 
 def parent_nav():
-    items=[("🏠 Начало","Начало"),("📅 Тренировки","Тренировки"),("📊 Развитие на футболиста","Развитие"),("⚽ Мачове","Мачове"),("💬 Съобщение от треньор","Съобщения"),("💰 Такси и плащане","Такси"),("ℹ️ Информация","Информация"),("📝 Обратна връзка","Обратна връзка"),("🗣️ ФЕН ЧАТ","ФЕН ЧАТ"),("👤 Настройки","Настройки")]
+    items=[("🏠 Начало","Начало"),("📅 Тренировки","Тренировки"),("⚽ Мачове","Мачове"),("💬 Съобщение от треньор","Съобщения"),("💰 Такси и плащане","Такси"),("ℹ️ Информация","Информация"),("📝 Обратна връзка","Обратна връзка"),("🗣️ ФЕН ЧАТ","ФЕН ЧАТ"),("👤 Настройки","Настройки")]
     st.session_state.setdefault("parent_page","Начало")
     with st.container(key="parent_nav"):
         for start in range(0,len(items),3):
@@ -1603,64 +1603,62 @@ def render_parent_player_development(user,child):
     rows=fetchall("""SELECT pe.* FROM player_evaluations pe JOIN parent_players pp ON pp.player_id=pe.player_id
         WHERE pe.academy_id=%s AND pp.academy_id=%s AND pp.parent_user_id=%s AND pe.player_id=%s
         ORDER BY pe.evaluation_year DESC,pe.evaluation_month DESC""",(ACADEMY_ID,ACADEMY_ID,user["id"],child["id"]))
+    if not rows:
+        st.info("Все още няма публикувана месечна оценка от треньора.")
+        return
+    labels=[("⚽ Техника","technique"),("🧠 Тактика","tactics"),("🏃 Физическа подготовка","physical"),("🤝 Работа в екип","teamwork"),("💪 Дисциплина","discipline"),("⭐ Старание","effort")]
+    available_years=sorted({int(row["evaluation_year"]) for row in rows},reverse=True)
+    period_options=["Всички оценки"]+[f"{year} година" for year in available_years]
+    selected_period=st.selectbox("Период за обобщената статистика",period_options,key=f"development_period_{child['id']}")
+    period_rows=rows if selected_period=="Всички оценки" else [row for row in rows if int(row["evaluation_year"])==int(selected_period.split()[0])]
+    period_label="целия наличен период" if selected_period=="Всички оценки" else selected_period
+    period_averages={field:sum(float(row[field]) for row in period_rows)/len(period_rows) for _,field in labels}
+    period_total=sum(period_averages.values())/len(period_averages)
+    if selected_period == "Всички оценки":
+        match_rating_row=fetchone("SELECT AVG(mps.match_rating)::numeric avg_rating FROM match_player_stats mps JOIN events e ON e.id=mps.event_id WHERE mps.academy_id=%s AND mps.player_id=%s AND mps.match_rating IS NOT NULL",(ACADEMY_ID,child["id"]))
+    else:
+        selected_year=int(selected_period.split()[0])
+        match_rating_row=fetchone("SELECT AVG(mps.match_rating)::numeric avg_rating FROM match_player_stats mps JOIN events e ON e.id=mps.event_id WHERE mps.academy_id=%s AND mps.player_id=%s AND mps.match_rating IS NOT NULL AND EXTRACT(YEAR FROM e.starts_at)::int = %s",(ACADEMY_ID,child["id"],selected_year))
+    if match_rating_row and match_rating_row.get("avg_rating") is not None:
+        match_avg=float(match_rating_row["avg_rating"]); period_total=period_total*0.80+match_avg*0.20
+        st.caption(f"Общата оценка включва 80% месечно развитие и 20% оценки от мачове. Средна мачова оценка: {match_avg:.1f}/5")
+    st.markdown(f"### 📈 Обобщено развитие за {period_label}")
+    metric_cols=st.columns(3)
+    for index,(label,field) in enumerate(labels): metric_cols[index%3].metric(label,f"{period_averages[field]:.1f} / 5")
+    st.progress(min(max(period_total/5,0.0),1.0)); st.markdown(f"### Общо за периода: {period_total:.1f} / 5"); st.write(f"**{evaluation_status(period_total)}**")
+    trend_rows=sorted(period_rows,key=lambda item:(item["evaluation_year"],item["evaluation_month"]))
+    if len(trend_rows)>1:
+        trend_data=pd.DataFrame({"Период":[f"{i['evaluation_month']:02d}.{i['evaluation_year']}" for i in trend_rows],"Общо развитие":[evaluation_average(i) for i in trend_rows]})
+        st.line_chart(trend_data.set_index("Период"),height=280)
     st.divider()
-    with st.expander("📊 Отвори статистиката за развитие", expanded=False):
-        if not rows:
-            st.info("Все още няма публикувана месечна оценка от треньора.")
-            return
-        labels=[("⚽ Техника","technique"),("🧠 Тактика","tactics"),("🏃 Физическа подготовка","physical"),("🤝 Работа в екип","teamwork"),("💪 Дисциплина","discipline"),("⭐ Старание","effort")]
-        available_years=sorted({int(row["evaluation_year"]) for row in rows},reverse=True)
-        period_options=["Всички оценки"]+[f"{year} година" for year in available_years]
-        selected_period=st.selectbox("Период за обобщената статистика",period_options,key=f"development_period_{child['id']}")
-        period_rows=rows if selected_period=="Всички оценки" else [row for row in rows if int(row["evaluation_year"])==int(selected_period.split()[0])]
-        period_label="целия наличен период" if selected_period=="Всички оценки" else selected_period
-        period_averages={field:sum(float(row[field]) for row in period_rows)/len(period_rows) for _,field in labels}
-        period_total=sum(period_averages.values())/len(period_averages)
-        if selected_period == "Всички оценки":
-            match_rating_row=fetchone("SELECT AVG(mps.match_rating)::numeric avg_rating FROM match_player_stats mps JOIN events e ON e.id=mps.event_id WHERE mps.academy_id=%s AND mps.player_id=%s AND mps.match_rating IS NOT NULL",(ACADEMY_ID,child["id"]))
-        else:
-            selected_year=int(selected_period.split()[0])
-            match_rating_row=fetchone("SELECT AVG(mps.match_rating)::numeric avg_rating FROM match_player_stats mps JOIN events e ON e.id=mps.event_id WHERE mps.academy_id=%s AND mps.player_id=%s AND mps.match_rating IS NOT NULL AND EXTRACT(YEAR FROM e.starts_at)::int = %s",(ACADEMY_ID,child["id"],selected_year))
-        if match_rating_row and match_rating_row.get("avg_rating") is not None:
-            match_avg=float(match_rating_row["avg_rating"]); period_total=period_total*0.80+match_avg*0.20
-            st.caption(f"Общата оценка включва 80% месечно развитие и 20% оценки от мачове. Средна мачова оценка: {match_avg:.1f}/5")
-        st.markdown(f"### 📈 Обобщено развитие за {period_label}")
-        metric_cols=st.columns(3)
-        for index,(label,field) in enumerate(labels): metric_cols[index%3].metric(label,f"{period_averages[field]:.1f} / 5")
-        st.progress(min(max(period_total/5,0.0),1.0)); st.markdown(f"### Общо за периода: {period_total:.1f} / 5"); st.write(f"**{evaluation_status(period_total)}**")
-        trend_rows=sorted(period_rows,key=lambda item:(item["evaluation_year"],item["evaluation_month"]))
-        if len(trend_rows)>1:
-            trend_data=pd.DataFrame({"Период":[f"{i['evaluation_month']:02d}.{i['evaluation_year']}" for i in trend_rows],"Общо развитие":[evaluation_average(i) for i in trend_rows]})
-            st.line_chart(trend_data.set_index("Период"),height=280)
-        st.divider()
-        latest=rows[0];score=evaluation_average(latest)
-        latest_match_row=fetchone(
-            """SELECT AVG(mps.match_rating)::numeric avg_rating FROM match_player_stats mps
-               JOIN events e ON e.id=mps.event_id
-               WHERE mps.academy_id=%s AND mps.player_id=%s AND mps.match_rating IS NOT NULL
-                 AND EXTRACT(YEAR FROM e.starts_at)::int = %s AND EXTRACT(MONTH FROM e.starts_at)::int = %s""",
-            (ACADEMY_ID,child["id"],latest["evaluation_year"],latest["evaluation_month"]),
-        )
-        latest_match_avg=float(latest_match_row["avg_rating"]) if latest_match_row and latest_match_row.get("avg_rating") is not None else None
+    latest=rows[0];score=evaluation_average(latest)
+    latest_match_row=fetchone(
+        """SELECT AVG(mps.match_rating)::numeric avg_rating FROM match_player_stats mps
+           JOIN events e ON e.id=mps.event_id
+           WHERE mps.academy_id=%s AND mps.player_id=%s AND mps.match_rating IS NOT NULL
+             AND EXTRACT(YEAR FROM e.starts_at)::int = %s AND EXTRACT(MONTH FROM e.starts_at)::int = %s""",
+        (ACADEMY_ID,child["id"],latest["evaluation_year"],latest["evaluation_month"]),
+    )
+    latest_match_avg=float(latest_match_row["avg_rating"]) if latest_match_row and latest_match_row.get("avg_rating") is not None else None
+    if latest_match_avg is not None:
+        score=score*0.80+latest_match_avg*0.20
+    with st.container(border=True):
+        st.markdown(f"### Последна оценка: {latest['evaluation_month']:02d}.{latest['evaluation_year']}")
+        for label,field in labels:st.write(f"**{label}:** {star_rating(latest[field])}")
+        st.markdown(f"### Общо развитие: {score:.1f} / 5");st.write(f"**{evaluation_status(score)}**")
         if latest_match_avg is not None:
-            score=score*0.80+latest_match_avg*0.20
-        with st.container(border=True):
-            st.markdown(f"### Последна оценка: {latest['evaluation_month']:02d}.{latest['evaluation_year']}")
-            for label,field in labels:st.write(f"**{label}:** {star_rating(latest[field])}")
-            st.markdown(f"### Общо развитие: {score:.1f} / 5");st.write(f"**{evaluation_status(score)}**")
-            if latest_match_avg is not None:
-                st.caption(f"Автоматично включени мачови оценки за месеца: {latest_match_avg:.1f}/5 (20% от общия резултат).")
-            st.caption("Статусът показва развитието за периода, а не определя детето като добър или слаб футболист.")
-            if latest.get("coach_note"):st.markdown("#### 📝 Бележка от треньора");st.write(latest["coach_note"])
-            render_attendance_stats(child["id"],child.get("team_id"),latest["evaluation_year"],latest["evaluation_month"])
-        st.markdown("### История на развитието")
-        for item in reversed(rows):
-            score=evaluation_average(item)
-            with st.expander(f"{item['evaluation_month']:02d}.{item['evaluation_year']} → {score:.1f}/5"):
-                for label,field in labels:st.write(f"**{label}:** {star_rating(item[field])}")
-                st.write(f"**{evaluation_status(score)}**")
-                if item.get("coach_note"):st.write(f"📝 {item['coach_note']}")
-                render_attendance_stats(child["id"],child.get("team_id"),item["evaluation_year"],item["evaluation_month"])
+            st.caption(f"Автоматично включени мачови оценки за месеца: {latest_match_avg:.1f}/5 (20% от общия резултат).")
+        st.caption("Статусът показва развитието за периода, а не определя детето като добър или слаб футболист.")
+        if latest.get("coach_note"):st.markdown("#### 📝 Бележка от треньора");st.write(latest["coach_note"])
+        render_attendance_stats(child["id"],child.get("team_id"),latest["evaluation_year"],latest["evaluation_month"])
+    st.markdown("### История на развитието")
+    for item in reversed(rows):
+        score=evaluation_average(item)
+        with st.expander(f"{item['evaluation_month']:02d}.{item['evaluation_year']} → {score:.1f}/5"):
+            for label,field in labels:st.write(f"**{label}:** {star_rating(item[field])}")
+            st.write(f"**{evaluation_status(score)}**")
+            if item.get("coach_note"):st.write(f"📝 {item['coach_note']}")
+            render_attendance_stats(child["id"],child.get("team_id"),item["evaluation_year"],item["evaluation_month"])
 
 def coach_player_statistics(user,team):
     players=fetchall("""SELECT p.* FROM players p JOIN teams t ON t.id=p.team_id JOIN coaches c ON c.id=t.coach_id
@@ -1969,9 +1967,16 @@ def parent_panel(user):
                 )
                 if r.get("description"): st.info(f"ℹ️ {r['description']}")
         if not rows: st.info("Няма добавени тренировки.")
-    elif page == "Развитие":
-        st.info("ℹ️ Тази статистика все още не е актуална. Ще бъдете уведомени от треньора, когато оценяването влезе официално в сила.")
-        render_parent_player_development(user,child)
+        st.divider()
+        show_development=st.checkbox(
+            "📊 Развитие на футболиста",
+            value=False,
+            key=f"show_development_{child['id']}",
+            help="Отвори наличната статистика за развитието на футболиста.",
+        )
+        st.info("ℹ️ Тази статистика не е актуална. Ще бъдете уведомени от треньора, когато оценяването влезе в сила.")
+        if show_development:
+            render_parent_player_development(user,child)
     elif page == "Мачове":
         match_view=st.radio(
             "Мачове",
