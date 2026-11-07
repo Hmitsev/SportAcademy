@@ -483,8 +483,26 @@ def init_db():
             SELECT %s,id,50.00 FROM teams WHERE academy_id=%s ON CONFLICT DO NOTHING""", (academy_id,academy_id))
     return academy_id
 
-ACADEMY_ID = init_db()
+try:
+    ACADEMY_ID = init_db()
 
+except (psycopg2.OperationalError, psycopg2.InterfaceError):
+    st.markdown("## 🔄 Връзката беше прекъсната")
+    st.info(
+        "Приложението е било неактивно известно време. "
+        "Моля, рефрешнете страницата, за да продължите."
+    )
+
+    if st.button(
+        "🔄 Опитай отново",
+        key="db_startup_retry",
+        use_container_width=True,
+        type="primary",
+    ):
+        st.cache_resource.clear()
+        st.rerun()
+
+    st.stop()
 # --- ONE-TIME MATCH TEST DATA RESET -----------------------------------------
 # Deletes only match-related test data that existed before the cutoff below.
 # The migration marker makes this safe to keep in the code: it runs once only.
@@ -525,7 +543,26 @@ def run_one_time_match_test_reset():
         cur.execute("INSERT INTO app_migrations(migration_key) VALUES(%s)", (MATCH_RESET_KEY,))
         return True
 
-run_one_time_match_test_reset()
+try:
+    run_one_time_match_test_reset()
+
+except (psycopg2.OperationalError, psycopg2.InterfaceError):
+    st.markdown("## 🔄 Връзката беше прекъсната")
+    st.info(
+        "Приложението е било неактивно известно време. "
+        "Моля, рефрешнете страницата, за да продължите."
+    )
+
+    if st.button(
+        "🔄 Опитай отново",
+        key="db_reset_retry",
+        use_container_width=True,
+        type="primary",
+    ):
+        st.cache_resource.clear()
+        st.rerun()
+
+    st.stop()
 # ---------------------------------------------------------------------------
 
 def apply_style():
