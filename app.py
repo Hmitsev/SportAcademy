@@ -400,6 +400,7 @@ def init_db():
             UNIQUE(event_id))""",
         """ALTER TABLE match_reports ADD COLUMN IF NOT EXISTS outcome TEXT CHECK(outcome IN ('win','draw','loss'))""",
         """ALTER TABLE match_reports ADD COLUMN IF NOT EXISTS has_exact_score BOOLEAN NOT NULL DEFAULT TRUE""",
+        """ALTER TABLE match_reports ADD COLUMN IF NOT EXISTS result_mode TEXT NOT NULL DEFAULT 'detailed' CHECK(result_mode IN ('simple','detailed'))""",
         """CREATE TABLE IF NOT EXISTS match_lineups(
             id BIGSERIAL PRIMARY KEY, academy_id BIGINT NOT NULL REFERENCES academies(id) ON DELETE CASCADE,
             event_id BIGINT NOT NULL REFERENCES events(id) ON DELETE CASCADE, player_id BIGINT NOT NULL REFERENCES players(id) ON DELETE CASCADE,
@@ -1811,15 +1812,15 @@ def match_day_panel(user,team):
             # При прост режим пазим съвместими технически стойности, без да показваме точен резултат.
             stored_home,stored_away=(home_score,away_score) if detailed else ({"win":(1,0),"draw":(0,0),"loss":(0,1)}[outcome])
             execute("""INSERT INTO match_reports(
-                       academy_id,event_id,team_id,opponent_name,home_score,away_score,outcome,has_exact_score,
+                       academy_id,event_id,team_id,opponent_name,home_score,away_score,outcome,has_exact_score,result_mode,
                        standings_url,confirmed,confirmed_by,confirmed_at)
-                   VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,TRUE,%s,NOW())
+                   VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,TRUE,%s,NOW())
                    ON CONFLICT(event_id) DO UPDATE SET
                        opponent_name=EXCLUDED.opponent_name,home_score=EXCLUDED.home_score,
-                       away_score=EXCLUDED.away_score,outcome=EXCLUDED.outcome,has_exact_score=EXCLUDED.has_exact_score,
+                       away_score=EXCLUDED.away_score,outcome=EXCLUDED.outcome,has_exact_score=EXCLUDED.has_exact_score,result_mode=EXCLUDED.result_mode,
                        standings_url=EXCLUDED.standings_url,confirmed=TRUE,
                        confirmed_by=EXCLUDED.confirmed_by,confirmed_at=NOW(),updated_at=NOW()""",
-                    (ACADEMY_ID,match["id"],team["id"],opponent.strip() or "Друг отбор",stored_home,stored_away,outcome,detailed,team.get("standings_url"),user["id"]))
+                    (ACADEMY_ID,match["id"],team["id"],opponent.strip() or "Друг отбор",stored_home,stored_away,outcome,detailed,"detailed" if detailed else "simple",team.get("standings_url"),user["id"]))
             execute("UPDATE match_player_stats SET goals=0,updated_at=NOW() WHERE academy_id=%s AND event_id=%s",(ACADEMY_ID,match["id"]))
             if detailed:
                 for scorer_id,goals in scorer_goals.items():
@@ -1869,7 +1870,8 @@ def render_results_dashboard(team, editable=False, key_prefix="results"):
             status={"win":"Победа","draw":"Равен","loss":"Загуба"}[outcome]
             icon={"win":"🟢","draw":"🔵","loss":"🔴"}[outcome]
             with st.container(border=True):
-                if r.get("has_exact_score",True):
+                detailed_result=(r.get("result_mode") == "detailed") if r.get("result_mode") else bool(r.get("has_exact_score"))
+                if detailed_result:
                     st.markdown(f"### {icon} The Lions {r['home_score']} : {r['away_score']} {r['opponent_name']}")
                     st.caption(f"{r['starts_at']:%d.%m.%Y %H:%M} · {r['title']} · {status}")
                 else:
