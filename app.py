@@ -567,7 +567,139 @@ except (psycopg2.OperationalError, psycopg2.InterfaceError):
 
     st.stop()
 # ---------------------------------------------------------------------------
+# ============================================================
+# ONE-TIME FINAL TEST DATA RESET
+# Нулира тестови плащания + тестови мачове.
+# Изпълнява се САМО ВЕДНЪЖ.
+# ============================================================
 
+FINAL_TEST_RESET_KEY = "final_test_reset_payments_matches_2026_11_07_v1"
+
+
+def run_final_test_data_reset():
+    with db() as conn, conn.cursor() as cur:
+
+        # Таблицата вече съществува, но я подсигуряваме.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS app_migrations(
+                migration_key TEXT PRIMARY KEY,
+                applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+
+        # Защита от едновременно стартиране от две сесии.
+        cur.execute(
+            "SELECT pg_advisory_xact_lock(hashtext(%s))",
+            (FINAL_TEST_RESET_KEY,)
+        )
+
+        # Ако вече е изпълнено, НЕ правим нищо.
+        cur.execute(
+            "SELECT 1 FROM app_migrations WHERE migration_key=%s",
+            (FINAL_TEST_RESET_KEY,)
+        )
+
+        if cur.fetchone():
+            return False
+
+        # ====================================================
+        # 1. НУЛИРАНЕ НА ПЛАЩАНИЯТА
+        # Начислените такси остават, но стават ДЪЛЖИМИ.
+        # ====================================================
+
+        cur.execute("""
+            UPDATE player_fees
+            SET
+                status = 'due',
+                payment_method = NULL,
+                payment_note = NULL,
+                bank_transfer_date = NULL,
+                payment_recorded_by = NULL,
+                confirmation_status = 'unreported',
+                parent_reported_at = NULL,
+                payment_reported_date = NULL,
+                confirmed_by = NULL,
+                paid_at = NULL
+            WHERE academy_id=%s
+        """, (ACADEMY_ID,))
+
+        # ====================================================
+        # 2. НАМИРАМЕ ВСИЧКИ ТЕСТОВИ МАЧОВЕ
+        # Само event_type='match'.
+        # Тренировките НЕ се засягат.
+        # ====================================================
+
+        cur.execute("""
+            SELECT id
+            FROM events
+            WHERE academy_id=%s
+              AND event_type='match'
+        """, (ACADEMY_ID,))
+
+        match_event_ids = [row[0] for row in cur.fetchall()]
+
+        if match_event_ids:
+
+            # Изчистваме известията, генерирани от тестовите мачове.
+            cur.execute("""
+                DELETE FROM notifications
+                WHERE academy_id=%s
+                  AND notification_type IN (
+                      'match',
+                      'match_squad',
+                      'match_result'
+                  )
+            """, (ACADEMY_ID,))
+
+            # Изтриваме самите match events.
+            #
+            # Свързаните:
+            # - match_reports
+            # - match_squads
+            # - match_lineups
+            # - match_player_stats
+            # - event_attachments
+            #
+            # се изтриват чрез ON DELETE CASCADE.
+            cur.execute("""
+                DELETE FROM events
+                WHERE academy_id=%s
+                  AND id = ANY(%s)
+            """, (ACADEMY_ID, match_event_ids))
+
+        # ====================================================
+        # 3. ЗАПИСВАМЕ, ЧЕ RESET-ЪТ Е ИЗПЪЛНЕН
+        # ====================================================
+
+        cur.execute("""
+            INSERT INTO app_migrations(migration_key)
+            VALUES(%s)
+        """, (FINAL_TEST_RESET_KEY,))
+
+        return True
+
+
+try:
+    run_final_test_data_reset()
+
+except (psycopg2.OperationalError, psycopg2.InterfaceError):
+
+    st.markdown("## 🔄 Връзката беше прекъсната")
+
+    st.info(
+        "Моля, рефрешнете страницата, за да продължите."
+    )
+
+    if st.button(
+        "🔄 Опитай отново",
+        key="final_test_reset_retry",
+        use_container_width=True,
+        type="primary",
+    ):
+        st.cache_resource.clear()
+        st.rerun()
+
+    st.stop()
 def apply_style():
     bg = image_data(ASSETS["background"])
 
