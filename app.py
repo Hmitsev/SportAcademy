@@ -1549,7 +1549,7 @@ def login():
             st.rerun()
 
 def parent_nav():
-    items=[("🏠 Начало","Начало"),("📅 Тренировки","Тренировки"),("⚽ Мачове","Мачове"),("💬 Съобщение от треньор","Съобщения"),("💰 Такси и плащане","Такси"),("ℹ️ Информация","Информация"),("📝 Обратна връзка","Обратна връзка"),("🗣️ ФЕН ЧАТ","ФЕН ЧАТ"),("👤 Настройки","Настройки")]
+    items=[("🏠 Начало","Начало"),("📅 Тренировки","Тренировки"),("📊 Развитие на футболиста","Развитие"),("⚽ Мачове","Мачове"),("💬 Съобщение от треньор","Съобщения"),("💰 Такси и плащане","Такси"),("ℹ️ Информация","Информация"),("📝 Обратна връзка","Обратна връзка"),("🗣️ ФЕН ЧАТ","ФЕН ЧАТ"),("👤 Настройки","Настройки")]
     st.session_state.setdefault("parent_page","Начало")
     with st.container(key="parent_nav"):
         for start in range(0,len(items),3):
@@ -1604,8 +1604,7 @@ def render_parent_player_development(user,child):
         WHERE pe.academy_id=%s AND pp.academy_id=%s AND pp.parent_user_id=%s AND pe.player_id=%s
         ORDER BY pe.evaluation_year DESC,pe.evaluation_month DESC""",(ACADEMY_ID,ACADEMY_ID,user["id"],child["id"]))
     st.divider()
-    with st.expander("📊 Развитие на футболиста", expanded=False):
-        st.warning("ℹ️ Тази статистика все още не е актуална. Ще бъдете уведомени от треньора, когато оценяването влезе официално в сила.")
+    with st.expander("📊 Отвори статистиката за развитие", expanded=False):
         if not rows:
             st.info("Все още няма публикувана месечна оценка от треньора.")
             return
@@ -1970,6 +1969,8 @@ def parent_panel(user):
                 )
                 if r.get("description"): st.info(f"ℹ️ {r['description']}")
         if not rows: st.info("Няма добавени тренировки.")
+    elif page == "Развитие":
+        st.info("ℹ️ Тази статистика все още не е актуална. Ще бъдете уведомени от треньора, когато оценяването влезе официално в сила.")
         render_parent_player_development(user,child)
     elif page == "Мачове":
         match_view=st.radio(
