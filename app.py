@@ -362,6 +362,16 @@ def init_db():
             last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""",
         """CREATE INDEX IF NOT EXISTS idx_login_sessions_token ON login_sessions(token_hash,last_seen)""",
+        """CREATE TABLE IF NOT EXISTS coach_teams(
+            academy_id BIGINT NOT NULL REFERENCES academies(id) ON DELETE CASCADE,
+            coach_id BIGINT NOT NULL REFERENCES coaches(id) ON DELETE CASCADE,
+            team_id BIGINT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+            assigned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY(coach_id,team_id))""",
+        "CREATE INDEX IF NOT EXISTS idx_coach_teams_team ON coach_teams(academy_id,team_id,coach_id)",
+        """INSERT INTO coach_teams(academy_id,coach_id,team_id)
+            SELECT academy_id,coach_id,id FROM teams WHERE coach_id IS NOT NULL
+            ON CONFLICT(coach_id,team_id) DO NOTHING""",
         """CREATE TABLE IF NOT EXISTS specialist_profiles(
             id BIGSERIAL PRIMARY KEY,
             academy_id BIGINT NOT NULL REFERENCES academies(id) ON DELETE CASCADE,
@@ -426,6 +436,8 @@ def init_db():
         """ALTER TABLE players ADD COLUMN IF NOT EXISTS profile_image_mime TEXT""",
         """ALTER TABLE coaches ADD COLUMN IF NOT EXISTS profile_image BYTEA""",
         """ALTER TABLE coaches ADD COLUMN IF NOT EXISTS profile_image_mime TEXT""",
+        """ALTER TABLE specialist_profiles ADD COLUMN IF NOT EXISTS profile_image BYTEA""",
+        """ALTER TABLE specialist_profiles ADD COLUMN IF NOT EXISTS profile_image_mime TEXT""",
         """ALTER TABLE academies ADD COLUMN IF NOT EXISTS parent_help_video_url TEXT""",
         """ALTER TABLE players ADD COLUMN IF NOT EXISTS position TEXT""",
         """ALTER TABLE teams ADD COLUMN IF NOT EXISTS standings_url TEXT""",
@@ -1734,8 +1746,18 @@ def parent_nav():
                     st.session_state.parent_page=page; st.rerun()
 
 def parent_players(user):
-    return fetchall("""SELECT p.*,t.name team_name,c.display_name coach_name,c.profile_image coach_image,c.profile_image_mime coach_image_mime FROM parent_players pp
-        JOIN players p ON p.id=pp.player_id LEFT JOIN teams t ON t.id=p.team_id LEFT JOIN coaches c ON c.id=t.coach_id
+    return fetchall("""SELECT p.*,t.name team_name,
+        COALESCE(tc.coach_names,'Очаква свързване') coach_name,
+        tc.coach_image,tc.coach_image_mime
+        FROM parent_players pp JOIN players p ON p.id=pp.player_id
+        LEFT JOIN teams t ON t.id=p.team_id
+        LEFT JOIN LATERAL (
+            SELECT STRING_AGG(c.display_name, ', ' ORDER BY c.display_name) coach_names,
+                   (ARRAY_AGG(c.profile_image ORDER BY c.id) FILTER(WHERE c.profile_image IS NOT NULL))[1] coach_image,
+                   (ARRAY_AGG(c.profile_image_mime ORDER BY c.id) FILTER(WHERE c.profile_image IS NOT NULL))[1] coach_image_mime
+            FROM coach_teams ct JOIN coaches c ON c.id=ct.coach_id AND c.active
+            WHERE ct.academy_id=p.academy_id AND ct.team_id=p.team_id
+        ) tc ON TRUE
         WHERE pp.academy_id=%s AND pp.parent_user_id=%s AND p.active ORDER BY p.first_name""",(ACADEMY_ID,user["id"]))
 
 def evaluation_average(row):
@@ -1836,13 +1858,15 @@ def render_parent_player_development(user,child):
             render_attendance_stats(child["id"],child.get("team_id"),item["evaluation_year"],item["evaluation_month"])
 
 def coach_player_statistics(user,team):
-    players=fetchall("""SELECT p.* FROM players p JOIN teams t ON t.id=p.team_id JOIN coaches c ON c.id=t.coach_id
+    players=fetchall("""SELECT p.* FROM players p JOIN coach_teams ct ON ct.team_id=p.team_id AND ct.academy_id=p.academy_id
+        JOIN coaches c ON c.id=ct.coach_id
         WHERE p.academy_id=%s AND p.team_id=%s AND p.approval_status='approved' AND p.active
         AND c.academy_id=%s AND c.user_id=%s AND c.active ORDER BY p.first_name,p.last_name""",(ACADEMY_ID,team["id"],ACADEMY_ID,user["id"]))
     if not players:st.info("Няма потвърдени футболисти в този набор.");return
     pmap={f"{x['first_name']} {x['last_name']}":x for x in players};label=st.selectbox("Футболист",list(pmap),key=f"eval_player_{team['id']}");player=pmap[label];now=date.today()
     c1,c2=st.columns(2);month=c1.selectbox("Месец",range(1,13),index=now.month-1,key=f"eval_month_{team['id']}_{player['id']}");year=int(c2.number_input("Година",2020,2100,now.year,key=f"eval_year_{team['id']}_{player['id']}"))
-    old=fetchone("""SELECT pe.* FROM player_evaluations pe JOIN teams t ON t.id=pe.team_id JOIN coaches c ON c.id=t.coach_id
+    old=fetchone("""SELECT pe.* FROM player_evaluations pe JOIN coach_teams ct ON ct.team_id=pe.team_id AND ct.academy_id=pe.academy_id
+        JOIN coaches c ON c.id=ct.coach_id
         WHERE pe.academy_id=%s AND pe.player_id=%s AND pe.team_id=%s AND pe.evaluation_year=%s AND pe.evaluation_month=%s AND c.user_id=%s AND c.active""",(ACADEMY_ID,player["id"],team["id"],year,month,user["id"]))
     if old:st.info("За този месец има запазена оценка. Промените ще обновят съществуващия запис.")
     criteria=[("⚽ Техника","technique"),("🧠 Тактика","tactics"),("🏃 Физическа подготовка","physical"),("🤝 Работа в екип","teamwork"),("💪 Дисциплина","discipline"),("⭐ Старание / отношение към тренировките","effort")];vals={}
@@ -1851,7 +1875,8 @@ def coach_player_statistics(user,team):
     score=sum(vals.values())/6;st.markdown(f"### Общо развитие: {score:.1f} / 5");st.write(f"**{evaluation_status(score)}**");st.caption("Статусът показва развитието за периода, а не определя детето като добър или слаб футболист.");render_attendance_stats(player["id"],team["id"],year,month)
     if st.button("💾 Запази месечната оценка",key=f"save_eval_{team['id']}_{player['id']}_{year}_{month}",use_container_width=True,type="primary"):
         saved=execute("""INSERT INTO player_evaluations(academy_id,player_id,team_id,coach_user_id,evaluation_year,evaluation_month,technique,tactics,physical,teamwork,discipline,effort,coach_note)
-            SELECT %s,p.id,p.team_id,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s FROM players p JOIN teams t ON t.id=p.team_id JOIN coaches c ON c.id=t.coach_id
+            SELECT %s,p.id,p.team_id,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s FROM players p JOIN coach_teams ct ON ct.team_id=p.team_id AND ct.academy_id=p.academy_id
+            JOIN coaches c ON c.id=ct.coach_id
             WHERE p.id=%s AND p.academy_id=%s AND p.team_id=%s AND p.approval_status='approved' AND p.active AND c.academy_id=%s AND c.user_id=%s AND c.active
             ON CONFLICT(player_id,evaluation_year,evaluation_month) DO UPDATE SET academy_id=EXCLUDED.academy_id,team_id=EXCLUDED.team_id,coach_user_id=EXCLUDED.coach_user_id,technique=EXCLUDED.technique,tactics=EXCLUDED.tactics,physical=EXCLUDED.physical,teamwork=EXCLUDED.teamwork,discipline=EXCLUDED.discipline,effort=EXCLUDED.effort,coach_note=EXCLUDED.coach_note,updated_at=NOW() RETURNING id""",
             (ACADEMY_ID,user["id"],year,month,vals["technique"],vals["tactics"],vals["physical"],vals["teamwork"],vals["discipline"],vals["effort"],note.strip() or None,player["id"],ACADEMY_ID,team["id"],ACADEMY_ID,user["id"]),True)
@@ -2276,11 +2301,16 @@ def parent_panel(user):
             st.warning("Детето още не е свързано с набор.")
     elif page=="Обратна връзка":
         st.subheader("📝 Обратна връзка към треньора")
-        coach_user = fetchone(
-            """SELECT c.user_id, c.display_name FROM teams t JOIN coaches c ON c.id=t.coach_id
-               WHERE t.academy_id=%s AND t.id=%s""",
-            (ACADEMY_ID, child.get("team_id")),
-        ) if child.get("team_id") else None
+        coach_users = fetchall(
+            """SELECT c.user_id,c.display_name FROM coach_teams ct JOIN coaches c ON c.id=ct.coach_id
+               JOIN users u ON u.id=c.user_id AND u.active
+               WHERE ct.academy_id=%s AND ct.team_id=%s AND c.active ORDER BY c.display_name""",
+            (ACADEMY_ID,child.get("team_id")),
+        ) if child.get("team_id") else []
+        coach_user = None
+        if coach_users:
+            coach_map={c["display_name"]:c for c in coach_users}
+            coach_user=coach_map[st.selectbox("Избери треньор",list(coach_map),key=f"feedback_coach_{child['id']}")]
         if not coach_user or not coach_user.get("user_id"):
             st.warning("За този набор още няма активен треньорски профил.")
         else:
@@ -2644,6 +2674,7 @@ def specialist_panel(user):
     show_flash()
     if not profile:st.warning("Профилът не е настроен. Admin трябва да определи вид специалист и набори.");return
     teams=specialist_teams(user["id"])
+    st.sidebar.markdown(avatar_html(profile.get("profile_image"),profile.get("profile_image_mime"),72),unsafe_allow_html=True)
     st.sidebar.caption(f"{profile['display_name']} · {specialist_role_label(profile['specialist_type'])}")
     sections=["Табло","Тренировки","Мачове","Съобщения","Информация","Статистика"]
     sec=st.sidebar.radio("Меню",sections,key="specialist_menu")
@@ -2707,6 +2738,13 @@ def admin_specialist_manager(admin_user):
     teams=fetchall("SELECT * FROM teams WHERE academy_id=%s AND active ORDER BY birth_year",(ACADEMY_ID,))
     for sp in profiles:
         with st.expander(f"{'🟢' if sp['active'] else '⚪'} {sp['display_name']} · {specialist_role_label(sp['specialist_type'])}"):
+            photo_col,upload_col=st.columns([1,5])
+            with photo_col:st.markdown(avatar_html(sp.get("profile_image"),sp.get("profile_image_mime"),82),unsafe_allow_html=True)
+            with upload_col:
+                specialist_image=st.file_uploader("Снимка на специалиста",type=["jpg","jpeg","png","webp"],key=f"specialist_image_{sp['id']}")
+                if st.button("Запази снимката",key=f"save_specialist_image_{sp['id']}"):
+                    ib,im=valid_profile_image(specialist_image)
+                    if ib:execute("UPDATE specialist_profiles SET profile_image=%s,profile_image_mime=%s WHERE id=%s AND academy_id=%s",(ib,im,sp["id"],ACADEMY_ID));set_flash("✅ Снимката на специалиста е запазена.");st.rerun()
             assigned={r["team_id"] for r in fetchall("SELECT team_id FROM specialist_teams WHERE academy_id=%s AND specialist_user_id=%s",(ACADEMY_ID,sp["user_id"]))}
             selected=st.multiselect("Зачислени набори",options=[t["id"] for t in teams],default=list(assigned),format_func=lambda tid:next(t["name"] for t in teams if t["id"]==tid),key=f"specialist_teams_{sp['id']}")
             active=st.checkbox("Активен профил",sp["active"] and sp["user_active"],key=f"specialist_active_{sp['id']}")
@@ -2775,7 +2813,10 @@ def admin_panel(user):
             for r in rows: st.write(f"🟢 **{r['first_name']} {r['last_name']}** · {r['email']}")
 
     elif sec == "Деца и групи":
-        teams = fetchall("SELECT t.*,c.display_name FROM teams t LEFT JOIN coaches c ON c.id=t.coach_id WHERE t.academy_id=%s AND t.active ORDER BY birth_year", (ACADEMY_ID,))
+        teams = fetchall("""SELECT t.*,COALESCE(STRING_AGG(c.display_name, ', ' ORDER BY c.display_name),'Без треньор') display_name
+            FROM teams t LEFT JOIN coach_teams ct ON ct.team_id=t.id AND ct.academy_id=t.academy_id
+            LEFT JOIN coaches c ON c.id=ct.coach_id AND c.active
+            WHERE t.academy_id=%s AND t.active GROUP BY t.id ORDER BY t.birth_year""",(ACADEMY_ID,))
         tmap = {f"{t['name']} · {t.get('display_name') or 'Без треньор'}": t for t in teams}
         pending_tab, archive_tab = st.tabs(["🔴 Очакващи деца", "🟢 Архив потвърдени"])
         with pending_tab:
@@ -2791,9 +2832,13 @@ def admin_panel(user):
             archive_label=st.selectbox("Покажи деца от набор",list(archive_options),key="admin_archive_team_filter")
             archive_team_id=archive_options[archive_label]
             if archive_team_id is None:
-                players=fetchall("""SELECT p.*,t.name team_name,c.display_name coach_name FROM players p LEFT JOIN teams t ON t.id=p.team_id LEFT JOIN coaches c ON c.id=t.coach_id WHERE p.academy_id=%s AND p.active AND p.approval_status='approved' ORDER BY t.birth_year,p.first_name,p.last_name""",(ACADEMY_ID,))
+                players=fetchall("""SELECT p.*,t.name team_name,COALESCE(tc.coach_names,'Без треньор') coach_name FROM players p LEFT JOIN teams t ON t.id=p.team_id
+                    LEFT JOIN LATERAL (SELECT STRING_AGG(c.display_name, ', ' ORDER BY c.display_name) coach_names FROM coach_teams ct JOIN coaches c ON c.id=ct.coach_id AND c.active WHERE ct.academy_id=p.academy_id AND ct.team_id=p.team_id) tc ON TRUE
+                    WHERE p.academy_id=%s AND p.active AND p.approval_status='approved' ORDER BY t.birth_year,p.first_name,p.last_name""",(ACADEMY_ID,))
             else:
-                players=fetchall("""SELECT p.*,t.name team_name,c.display_name coach_name FROM players p LEFT JOIN teams t ON t.id=p.team_id LEFT JOIN coaches c ON c.id=t.coach_id WHERE p.academy_id=%s AND p.team_id=%s AND p.active AND p.approval_status='approved' ORDER BY p.first_name,p.last_name""",(ACADEMY_ID,archive_team_id))
+                players=fetchall("""SELECT p.*,t.name team_name,COALESCE(tc.coach_names,'Без треньор') coach_name FROM players p LEFT JOIN teams t ON t.id=p.team_id
+                    LEFT JOIN LATERAL (SELECT STRING_AGG(c.display_name, ', ' ORDER BY c.display_name) coach_names FROM coach_teams ct JOIN coaches c ON c.id=ct.coach_id AND c.active WHERE ct.academy_id=p.academy_id AND ct.team_id=p.team_id) tc ON TRUE
+                    WHERE p.academy_id=%s AND p.team_id=%s AND p.active AND p.approval_status='approved' ORDER BY p.first_name,p.last_name""",(ACADEMY_ID,archive_team_id))
             if not players: st.info("Няма потвърдени деца.")
             for player in players:
                 with st.expander(f"🟢 {player['first_name']} {player['last_name']} · {player.get('team_name') or 'Без група'} · {player.get('coach_name') or 'Без треньор'}"):
@@ -2845,9 +2890,15 @@ def admin_panel(user):
         cmap={c["display_name"]:c["id"] for c in coaches};st.subheader("⚽ Управление на набор")
         if teams:
             tmap={t["name"]:t for t in teams};team=tmap[st.selectbox("Избери набор",list(tmap),key="admin_selected_team_assignment")]
-            names=["Без треньор"]+list(cmap);row=fetchone("SELECT display_name FROM coaches WHERE id=%s",(team.get("coach_id"),)) if team.get("coach_id") else None;current=row["display_name"] if row else "Без треньор"
-            selected=st.selectbox("Треньор на набора",names,index=names.index(current) if current in names else 0,key=f"tc{team['id']}")
-            if st.button("💾 Запази треньора за набора",key=f"ts{team['id']}",use_container_width=True): execute("UPDATE teams SET coach_id=%s WHERE id=%s AND academy_id=%s",(None if selected=="Без треньор" else cmap[selected],team["id"],ACADEMY_ID));set_flash(f"✅ {team['name']} е обновен.");st.rerun()
+            assigned_rows=fetchall("SELECT coach_id FROM coach_teams WHERE academy_id=%s AND team_id=%s",(ACADEMY_ID,team["id"]))
+            assigned_ids={r["coach_id"] for r in assigned_rows}
+            selected_ids=st.multiselect("Треньори на набора",options=[c["id"] for c in coaches],default=list(assigned_ids),format_func=lambda cid:next(c["display_name"] for c in coaches if c["id"]==cid),key=f"tc_multi_{team['id']}",help="Може да избереш един или повече треньори.")
+            if st.button("💾 Запази треньорите за набора",key=f"ts{team['id']}",use_container_width=True):
+                with db() as conn,conn.cursor() as cur:
+                    cur.execute("DELETE FROM coach_teams WHERE academy_id=%s AND team_id=%s",(ACADEMY_ID,team["id"]))
+                    for coach_id in selected_ids:cur.execute("INSERT INTO coach_teams(academy_id,coach_id,team_id) VALUES(%s,%s,%s)",(ACADEMY_ID,coach_id,team["id"]))
+                    cur.execute("UPDATE teams SET coach_id=%s WHERE id=%s AND academy_id=%s",(selected_ids[0] if selected_ids else None,team["id"],ACADEMY_ID))
+                set_flash(f"✅ Треньорите за {team['name']} са обновени.");st.rerun()
     elif sec == "Роли и права":
         st.caption("Admin има пълен достъп. Coach вижда своите набори. Specialist вижда само зачислените от Admin набори. Parent вижда само своите деца.")
         users = fetchall("SELECT * FROM users WHERE academy_id=%s ORDER BY role,first_name,last_name", (ACADEMY_ID,))
@@ -3095,7 +3146,8 @@ def coach_panel(user):
     if not coach:
         st.warning("Този Coach профил още не е свързан с треньор. Admin трябва да го свърже от „Треньори и набори“.")
         return
-    teams = fetchall("SELECT * FROM teams WHERE academy_id=%s AND coach_id=%s AND active ORDER BY birth_year", (ACADEMY_ID, coach["id"]))
+    teams = fetchall("""SELECT DISTINCT t.* FROM coach_teams ct JOIN teams t ON t.id=ct.team_id
+        WHERE ct.academy_id=%s AND ct.coach_id=%s AND t.active ORDER BY t.birth_year""",(ACADEMY_ID,coach["id"]))
     if not teams:
         st.info("Няма възложени набори към този треньор.")
         return
