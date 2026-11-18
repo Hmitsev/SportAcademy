@@ -2715,6 +2715,19 @@ def specialist_panel(user):
     else:specialist_statistics_panel(user,team)
 def admin_specialist_manager(admin_user):
     st.subheader("🏃 Кондиционен и поддържащ екип")
+    orphan_specialists=fetchall("""SELECT u.* FROM users u LEFT JOIN specialist_profiles sp ON sp.user_id=u.id
+        WHERE u.academy_id=%s AND u.role='specialist' AND sp.id IS NULL ORDER BY u.first_name,u.last_name""",(ACADEMY_ID,))
+    if orphan_specialists:
+        st.warning("Има Specialist профил(и), създадени по старата логика без настройки. Поправи ги оттук.")
+        for orphan in orphan_specialists:
+            with st.container(border=True):
+                st.write(f"**{orphan['first_name']} {orphan['last_name']}** · {orphan['email']}")
+                repair_type=st.selectbox("Вид специалист",list(SPECIALIST_TYPE_LABELS),format_func=specialist_role_label,key=f"repair_specialist_type_{orphan['id']}")
+                if st.button("🔧 Създай липсващия Specialist профил",key=f"repair_specialist_{orphan['id']}",use_container_width=True):
+                    execute("""INSERT INTO specialist_profiles(academy_id,user_id,display_name,specialist_type,active)
+                        VALUES(%s,%s,%s,%s,TRUE) ON CONFLICT(user_id) DO NOTHING""",
+                        (ACADEMY_ID,orphan['id'],f"{orphan['first_name']} {orphan['last_name']}",repair_type))
+                    set_flash("✅ Липсващият Specialist профил е създаден. Сега зачисли необходимите набори.");st.rerun()
     st.caption("Създай профил за кондиционен треньор, медицинско лице, психолог или друг специалист и му зачисли един или повече набори.")
     with st.form("new_specialist_account",clear_on_submit=True):
         c1,c2=st.columns(2);name=c1.text_input("Име и фамилия");email=c2.text_input("Имейл за вход").strip().lower()
@@ -2900,17 +2913,21 @@ def admin_panel(user):
                     cur.execute("UPDATE teams SET coach_id=%s WHERE id=%s AND academy_id=%s",(selected_ids[0] if selected_ids else None,team["id"],ACADEMY_ID))
                 set_flash(f"✅ Треньорите за {team['name']} са обновени.");st.rerun()
     elif sec == "Роли и права":
-        st.caption("Admin има пълен достъп. Coach вижда своите набори. Specialist вижда само зачислените от Admin набори. Parent вижда само своите деца.")
+        st.caption("Тук се управляват Parent, Coach и Admin. Specialist профилите се създават и настройват само от „Кондиционен екип“.")
         users = fetchall("SELECT * FROM users WHERE academy_id=%s ORDER BY role,first_name,last_name", (ACADEMY_ID,))
         user_labels={f"{a['first_name']} {a['last_name']} · {a['email']} · {a['role']}":a for a in users}
         account=user_labels[st.selectbox("Избери потребител",list(user_labels),key="admin_selected_rights_user")]
         with st.container(border=True):
-            roles = ["parent", "coach", "specialist", "admin"]
+            roles = ["parent", "coach", "admin"]
             role = st.selectbox("Роля", roles, index=roles.index(account["role"]) if account["role"] in roles else 0, key=f"role_{account['id']}")
             active = st.checkbox("Активен профил", value=account["active"], key=f"active_{account['id']}")
+            if account["role"] == "specialist":
+                st.info("Този профил е Specialist. Видът специалист, снимката и зачислените набори се управляват само от „Кондиционен екип“.")
             if st.button("Запази права", key=f"rights_{account['id']}", use_container_width=True):
                 if account["id"] == user["id"] and (role != "admin" or not active):
                     st.error("Не можеш да премахнеш собствените си Admin права или да деактивираш текущия профил.")
+                elif account["role"] == "specialist":
+                    st.error("Specialist профилът се управлява от „Кондиционен екип“. Така ролята и настройките му не могат да се разминават.")
                 else:
                     execute("UPDATE users SET role=%s,active=%s WHERE id=%s AND academy_id=%s", (role, active, account["id"], ACADEMY_ID)); st.rerun()
 
