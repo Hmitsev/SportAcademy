@@ -362,6 +362,48 @@ def init_db():
             last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""",
         """CREATE INDEX IF NOT EXISTS idx_login_sessions_token ON login_sessions(token_hash,last_seen)""",
+        """CREATE TABLE IF NOT EXISTS specialist_profiles(
+            id BIGSERIAL PRIMARY KEY,
+            academy_id BIGINT NOT NULL REFERENCES academies(id) ON DELETE CASCADE,
+            user_id BIGINT NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+            display_name TEXT NOT NULL,
+            specialist_type TEXT NOT NULL DEFAULT 'conditioning' CHECK(specialist_type IN ('conditioning','medical','psychologist','other')),
+            qualification TEXT,
+            active BOOLEAN NOT NULL DEFAULT TRUE,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""",
+        """CREATE TABLE IF NOT EXISTS specialist_teams(
+            academy_id BIGINT NOT NULL REFERENCES academies(id) ON DELETE CASCADE,
+            specialist_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            team_id BIGINT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+            assigned_by BIGINT REFERENCES users(id) ON DELETE SET NULL,
+            assigned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY(specialist_user_id,team_id))""",
+        "CREATE INDEX IF NOT EXISTS idx_specialist_teams_user ON specialist_teams(academy_id,specialist_user_id,team_id)",
+        """CREATE TABLE IF NOT EXISTS specialist_player_notes(
+            id BIGSERIAL PRIMARY KEY,
+            academy_id BIGINT NOT NULL REFERENCES academies(id) ON DELETE CASCADE,
+            specialist_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            player_id BIGINT NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+            team_id BIGINT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+            observation_date DATE NOT NULL DEFAULT CURRENT_DATE,
+            technique INTEGER NOT NULL CHECK(technique BETWEEN 1 AND 5),
+            teamwork INTEGER NOT NULL CHECK(teamwork BETWEEN 1 AND 5),
+            effort INTEGER NOT NULL CHECK(effort BETWEEN 1 AND 5),
+            discipline INTEGER NOT NULL CHECK(discipline BETWEEN 1 AND 5),
+            note TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            UNIQUE(specialist_user_id,player_id,observation_date))""",
+        "CREATE INDEX IF NOT EXISTS idx_specialist_notes_history ON specialist_player_notes(academy_id,specialist_user_id,player_id,observation_date DESC)",
+        """CREATE TABLE IF NOT EXISTS specialist_messages(
+            id BIGSERIAL PRIMARY KEY,
+            academy_id BIGINT NOT NULL REFERENCES academies(id) ON DELETE CASCADE,
+            specialist_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            sender_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+            subject TEXT NOT NULL,
+            body TEXT NOT NULL,
+            is_read BOOLEAN NOT NULL DEFAULT FALSE,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""",
         """CREATE TABLE IF NOT EXISTS player_evaluations(
             id BIGSERIAL PRIMARY KEY,
             academy_id BIGINT NOT NULL REFERENCES academies(id) ON DELETE CASCADE,
@@ -2517,6 +2559,171 @@ def coach_account_manager():
                     uid=execute("INSERT INTO users(academy_id,first_name,last_name,email,password_hash,role,account_status) VALUES(%s,%s,'Треньор',%s,%s,'coach','approved') RETURNING id",(ACADEMY_ID,name.strip(),email,hash_password(password)),True)["id"]
                 execute("UPDATE coaches SET user_id=%s,display_name=%s WHERE id=%s AND academy_id=%s",(uid,name.strip(),coach["id"],ACADEMY_ID));set_flash("✅ Треньорският достъп е готов.");st.rerun()
 
+SPECIALIST_TYPE_LABELS={
+    "conditioning":"Кондиционен треньор",
+    "medical":"Медицинско лице",
+    "psychologist":"Психолог",
+    "other":"Друг специалист",
+}
+def specialist_role_label(value):
+    return SPECIALIST_TYPE_LABELS.get(value,value or "Специалист")
+def specialist_teams(user_id):
+    return fetchall("""SELECT t.* FROM specialist_teams st
+        JOIN teams t ON t.id=st.team_id
+        WHERE st.academy_id=%s AND st.specialist_user_id=%s AND t.active
+        ORDER BY t.birth_year,t.name""",(ACADEMY_ID,user_id))
+def specialist_statistics_excel(user_id,team_ids):
+    if not team_ids:return b""
+    rows=fetchall("""SELECT spn.observation_date,t.name team_name,p.first_name,p.last_name,
+        spn.technique,spn.teamwork,spn.effort,spn.discipline,spn.note,
+        sp.display_name,specialist_type
+        FROM specialist_player_notes spn
+        JOIN players p ON p.id=spn.player_id
+        JOIN teams t ON t.id=spn.team_id
+        JOIN specialist_profiles sp ON sp.user_id=spn.specialist_user_id
+        WHERE spn.academy_id=%s AND spn.specialist_user_id=%s AND spn.team_id=ANY(%s)
+        ORDER BY p.last_name,p.first_name,spn.observation_date DESC""",(ACADEMY_ID,user_id,team_ids))
+    data=[]
+    for r in rows:
+        data.append({"Дата":r["observation_date"],"Набор":r["team_name"],
+            "Дете":f"{r['first_name']} {r['last_name']}","Техника":r["technique"],
+            "Работа в екип":r["teamwork"],"Старание":r["effort"],"Дисциплина":r["discipline"],
+            "Средна стойност":round((r["technique"]+r["teamwork"]+r["effort"]+r["discipline"])/4,2),
+            "Коментар":r.get("note") or "","Специалист":r["display_name"],
+            "Профил":specialist_role_label(r["specialist_type"])})
+    out=io.BytesIO()
+    with pd.ExcelWriter(out,engine="openpyxl") as writer:
+        pd.DataFrame(data).to_excel(writer,index=False,sheet_name="Вътрешна статистика")
+        ws=writer.book["Вътрешна статистика"];ws.freeze_panes="A2";ws.auto_filter.ref=ws.dimensions
+        for col in ws.columns:ws.column_dimensions[col[0].column_letter].width=min(max(len(str(c.value or "")) for c in col)+2,45)
+    return out.getvalue()
+def specialist_statistics_panel(user,team):
+    st.subheader("📊 Вътрешна статистика и наблюдения")
+    st.info("Тези записи са вътрешни за кондиционния/поддържащия екип. Не се показват в родителския профил и не участват в треньорската месечна оценка.")
+    players=fetchall("""SELECT * FROM players WHERE academy_id=%s AND team_id=%s
+        AND approval_status='approved' AND active ORDER BY first_name,last_name""",(ACADEMY_ID,team["id"]))
+    if not players:st.info("Няма потвърдени деца в този набор.");return
+    pmap={f"{p['first_name']} {p['last_name']}":p for p in players}
+    player=pmap[st.selectbox("Дете",list(pmap),key=f"specialist_player_{team['id']}")]
+    observations=fetchall("""SELECT * FROM specialist_player_notes WHERE academy_id=%s
+        AND specialist_user_id=%s AND player_id=%s ORDER BY observation_date DESC,created_at DESC""",
+        (ACADEMY_ID,user["id"],player["id"]))
+    with st.form(f"specialist_note_{team['id']}_{player['id']}",clear_on_submit=True):
+        obs_date=st.date_input("Дата на наблюдението",date.today())
+        st.caption("Оценяването е от 1 до 5 и служи само за вътрешно проследяване.")
+        c1,c2=st.columns(2)
+        technique=c1.select_slider("Техника",options=[1,2,3,4,5],value=3,format_func=lambda x:f"{x} ★")
+        teamwork=c2.select_slider("Работа в екип",options=[1,2,3,4,5],value=3,format_func=lambda x:f"{x} ★")
+        effort=c1.select_slider("Старание",options=[1,2,3,4,5],value=3,format_func=lambda x:f"{x} ★")
+        discipline=c2.select_slider("Дисциплина",options=[1,2,3,4,5],value=3,format_func=lambda x:f"{x} ★")
+        note=st.text_area("Бележка / професионално наблюдение",placeholder="Кратък обективен коментар за конкретното наблюдение.")
+        save=st.form_submit_button("💾 Запази във вътрешната история",use_container_width=True,type="primary")
+    if save:
+        execute("""INSERT INTO specialist_player_notes(academy_id,specialist_user_id,player_id,team_id,observation_date,technique,teamwork,effort,discipline,note)
+            VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            ON CONFLICT(specialist_user_id,player_id,observation_date) DO UPDATE SET
+            team_id=EXCLUDED.team_id,technique=EXCLUDED.technique,teamwork=EXCLUDED.teamwork,
+            effort=EXCLUDED.effort,discipline=EXCLUDED.discipline,note=EXCLUDED.note,updated_at=NOW()""",
+            (ACADEMY_ID,user["id"],player["id"],team["id"],obs_date,technique,teamwork,effort,discipline,note.strip() or None))
+        set_flash("✅ Наблюдението е запазено само във вътрешната история на специалиста.");st.rerun()
+    st.markdown(f"### История · {player['first_name']} {player['last_name']}")
+    if not observations:st.info("Все още няма записани наблюдения за това дете.")
+    for row in observations:
+        avg=(row["technique"]+row["teamwork"]+row["effort"]+row["discipline"])/4
+        with st.expander(f"{row['observation_date']:%d.%m.%Y} · Средно {avg:.1f}/5"):
+            a,b,c,d=st.columns(4);a.metric("Техника",row["technique"]);b.metric("Екип",row["teamwork"]);c.metric("Старание",row["effort"]);d.metric("Дисциплина",row["discipline"])
+            if row.get("note"):st.write(f"📝 {row['note']}")
+            if st.button("🗑️ Изтрий този запис",key=f"del_specialist_note_{row['id']}"):
+                execute("DELETE FROM specialist_player_notes WHERE id=%s AND academy_id=%s AND specialist_user_id=%s",(row["id"],ACADEMY_ID,user["id"]));st.rerun()
+    all_team_ids=[t["id"] for t in specialist_teams(user["id"])]
+    export_data=specialist_statistics_excel(user["id"],all_team_ids)
+    if export_data:st.download_button("📥 Excel: статистика, дати и коментари",export_data,"specialist_player_statistics.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True)
+def specialist_panel(user):
+    profile=fetchone("SELECT * FROM specialist_profiles WHERE academy_id=%s AND user_id=%s AND active",(ACADEMY_ID,user["id"]))
+    st.title("Кондиционен и поддържащ екип")
+    show_flash()
+    if not profile:st.warning("Профилът не е настроен. Admin трябва да определи вид специалист и набори.");return
+    teams=specialist_teams(user["id"])
+    st.sidebar.caption(f"{profile['display_name']} · {specialist_role_label(profile['specialist_type'])}")
+    sections=["Табло","Тренировки","Мачове","Съобщения","Информация","Статистика"]
+    sec=st.sidebar.radio("Меню",sections,key="specialist_menu")
+    if not teams:st.info("Все още няма зачислени набори към този профил.");return
+    tmap={t["name"]:t for t in teams};team=tmap[st.selectbox("Набор",list(tmap),key="specialist_team")]
+    if sec=="Табло":
+        players=fetchone("SELECT COUNT(*) c FROM players WHERE academy_id=%s AND team_id=%s AND active AND approval_status='approved'",(ACADEMY_ID,team["id"]))["c"]
+        upcoming=fetchone("SELECT COUNT(*) c FROM events WHERE academy_id=%s AND team_id=%s AND starts_at>=NOW() AND status<>'cancelled'",(ACADEMY_ID,team["id"]))["c"]
+        c1,c2=st.columns(2);c1.metric("Деца в набора",players);c2.metric("Предстоящи събития",upcoming)
+        st.caption("Профилът има достъп само до наборите, които са зададени от Admin.")
+        unread=unread_notification_count(user["id"])
+        if unread:notification_center(user)
+    elif sec in ("Тренировки","Мачове"):
+        typ="training" if sec=="Тренировки" else "match"
+        rows=fetchall("SELECT * FROM events WHERE academy_id=%s AND team_id=%s AND event_type=%s AND status<>'cancelled' ORDER BY starts_at DESC LIMIT 100",(ACADEMY_ID,team["id"],typ))
+        for r in rows:
+            with st.container(border=True):
+                st.write(f"**{r['title']} · {r['starts_at']:%d.%m.%Y %H:%M}**")
+                if r.get("opponent"):st.write(f"Противник: {r['opponent']}")
+                st.caption(r.get("location") or "Без посочено място")
+                if r.get("description"):st.info(r["description"])
+        if not rows:st.info("Няма добавени събития за избрания набор.")
+    elif sec=="Съобщения":
+        rows=fetchall("""SELECT tm.*,u.first_name,u.last_name FROM team_messages tm
+            LEFT JOIN users u ON u.id=tm.sender_user_id
+            WHERE tm.academy_id=%s AND tm.team_id=%s ORDER BY tm.created_at DESC""",(ACADEMY_ID,team["id"]))
+        direct=fetchall("""SELECT * FROM specialist_messages WHERE academy_id=%s AND specialist_user_id=%s ORDER BY created_at DESC""",(ACADEMY_ID,user["id"]))
+        st.subheader("Съобщения от Admin")
+        for m in direct:
+            with st.container(border=True):st.write(f"**{m['subject']}**");st.write(m['body']);st.caption(m['created_at'].strftime("%d.%m.%Y %H:%M"))
+        if not direct:st.info("Няма директни съобщения от Admin.")
+        execute("UPDATE specialist_messages SET is_read=TRUE WHERE academy_id=%s AND specialist_user_id=%s",(ACADEMY_ID,user["id"]))
+        st.subheader("Съобщения за набора от Admin и треньори")
+        for m in rows:
+            with st.container(border=True):st.write(f"**{m['title']}**");st.write(m['body']);st.caption(f"{m.get('first_name') or 'Admin'} {m.get('last_name') or ''} · {m['created_at']:%d.%m.%Y %H:%M}")
+        if not rows:st.info("Няма съобщения за този набор.")
+    elif sec=="Информация":parent_information(None)
+    else:specialist_statistics_panel(user,team)
+def admin_specialist_manager(admin_user):
+    st.subheader("🏃 Кондиционен и поддържащ екип")
+    st.caption("Създай профил за кондиционен треньор, медицинско лице, психолог или друг специалист и му зачисли един или повече набори.")
+    with st.form("new_specialist_account",clear_on_submit=True):
+        c1,c2=st.columns(2);name=c1.text_input("Име и фамилия");email=c2.text_input("Имейл за вход").strip().lower()
+        typ=c1.selectbox("Вид профил",list(SPECIALIST_TYPE_LABELS),format_func=specialist_role_label)
+        qualification=c2.text_input("Квалификация / длъжност",placeholder="Напр. кондиционен треньор, физиотерапевт")
+        password=st.text_input("Начална парола",type="password")
+        create=st.form_submit_button("Създай профила",use_container_width=True)
+    if create:
+        if not name.strip() or not email or len(password)<8:st.error("Въведи име, имейл и парола с минимум 8 символа.")
+        else:
+            parts=name.strip().split(maxsplit=1);first=parts[0];last=parts[1] if len(parts)>1 else "Специалист"
+            existing=fetchone("SELECT id FROM users WHERE academy_id=%s AND lower(email)=lower(%s)",(ACADEMY_ID,email))
+            if existing:uid=existing["id"];execute("UPDATE users SET first_name=%s,last_name=%s,password_hash=%s,role='specialist',account_status='approved',active=TRUE WHERE id=%s AND academy_id=%s",(first,last,hash_password(password),uid,ACADEMY_ID))
+            else:uid=execute("INSERT INTO users(academy_id,first_name,last_name,email,password_hash,role,account_status) VALUES(%s,%s,%s,%s,%s,'specialist','approved') RETURNING id",(ACADEMY_ID,first,last,email,hash_password(password)),True)["id"]
+            execute("""INSERT INTO specialist_profiles(academy_id,user_id,display_name,specialist_type,qualification,active)
+                VALUES(%s,%s,%s,%s,%s,TRUE) ON CONFLICT(user_id) DO UPDATE SET display_name=EXCLUDED.display_name,
+                specialist_type=EXCLUDED.specialist_type,qualification=EXCLUDED.qualification,active=TRUE""",(ACADEMY_ID,uid,name.strip(),typ,qualification.strip() or None))
+            set_flash("✅ Профилът на специалиста е създаден.");st.rerun()
+    profiles=fetchall("""SELECT sp.*,u.email,u.active user_active FROM specialist_profiles sp JOIN users u ON u.id=sp.user_id
+        WHERE sp.academy_id=%s ORDER BY sp.active DESC,sp.display_name""",(ACADEMY_ID,))
+    teams=fetchall("SELECT * FROM teams WHERE academy_id=%s AND active ORDER BY birth_year",(ACADEMY_ID,))
+    for sp in profiles:
+        with st.expander(f"{'🟢' if sp['active'] else '⚪'} {sp['display_name']} · {specialist_role_label(sp['specialist_type'])}"):
+            assigned={r["team_id"] for r in fetchall("SELECT team_id FROM specialist_teams WHERE academy_id=%s AND specialist_user_id=%s",(ACADEMY_ID,sp["user_id"]))}
+            selected=st.multiselect("Зачислени набори",options=[t["id"] for t in teams],default=list(assigned),format_func=lambda tid:next(t["name"] for t in teams if t["id"]==tid),key=f"specialist_teams_{sp['id']}")
+            active=st.checkbox("Активен профил",sp["active"] and sp["user_active"],key=f"specialist_active_{sp['id']}")
+            a,b=st.columns(2)
+            if a.button("💾 Запази наборите",key=f"save_specialist_{sp['id']}",use_container_width=True):
+                with db() as conn,conn.cursor() as cur:
+                    cur.execute("DELETE FROM specialist_teams WHERE academy_id=%s AND specialist_user_id=%s",(ACADEMY_ID,sp["user_id"]))
+                    for team_id in selected:cur.execute("INSERT INTO specialist_teams(academy_id,specialist_user_id,team_id,assigned_by) VALUES(%s,%s,%s,%s)",(ACADEMY_ID,sp["user_id"],team_id,admin_user["id"]))
+                    cur.execute("UPDATE specialist_profiles SET active=%s WHERE id=%s AND academy_id=%s",(active,sp["id"],ACADEMY_ID));cur.execute("UPDATE users SET active=%s WHERE id=%s AND academy_id=%s",(active,sp["user_id"],ACADEMY_ID))
+                set_flash("✅ Наборите и достъпът са обновени.");st.rerun()
+            if b.button("📨 Съобщение",key=f"toggle_specialist_message_{sp['id']}",use_container_width=True):st.session_state[f"show_specialist_message_{sp['id']}"]=not st.session_state.get(f"show_specialist_message_{sp['id']}",False);st.rerun()
+            if st.session_state.get(f"show_specialist_message_{sp['id']}"):
+                with st.form(f"specialist_message_form_{sp['id']}",clear_on_submit=True):
+                    subject=st.text_input("Тема");body=st.text_area("Съобщение");send=st.form_submit_button("Изпрати")
+                if send and subject.strip() and body.strip():
+                    execute("INSERT INTO specialist_messages(academy_id,specialist_user_id,sender_user_id,subject,body) VALUES(%s,%s,%s,%s,%s)",(ACADEMY_ID,sp["user_id"],admin_user["id"],subject.strip(),body.strip()));create_notification(sp["user_id"],"specialist_message",subject.strip(),body.strip());set_flash("✅ Съобщението е изпратено.");st.rerun()
+
 def admin_panel(user):
     count = unread_notification_count(user["id"])
     st.title("Административен панел")
@@ -2525,7 +2732,7 @@ def admin_panel(user):
         with st.expander(f"🔔 {count} нови известия", expanded=False):
             notification_center(user)
     sections = ["Табло", "Регистрации", "Деца и групи", "Треньори и набори", "Роли и права",
-                "Тренировки и мачове", "Управление тренировки", "Съобщения", "Финанси", "Информация"]
+                "Тренировки и мачове", "Управление тренировки", "Кондиционен екип", "Съобщения", "Финанси", "Информация"]
     sec = st.sidebar.radio("Админ меню", sections)
 
     if sec == "Табло":
@@ -2642,12 +2849,12 @@ def admin_panel(user):
             selected=st.selectbox("Треньор на набора",names,index=names.index(current) if current in names else 0,key=f"tc{team['id']}")
             if st.button("💾 Запази треньора за набора",key=f"ts{team['id']}",use_container_width=True): execute("UPDATE teams SET coach_id=%s WHERE id=%s AND academy_id=%s",(None if selected=="Без треньор" else cmap[selected],team["id"],ACADEMY_ID));set_flash(f"✅ {team['name']} е обновен.");st.rerun()
     elif sec == "Роли и права":
-        st.caption("Admin има пълен достъп. Coach вижда само своите набори. Parent вижда само своите деца.")
+        st.caption("Admin има пълен достъп. Coach вижда своите набори. Specialist вижда само зачислените от Admin набори. Parent вижда само своите деца.")
         users = fetchall("SELECT * FROM users WHERE academy_id=%s ORDER BY role,first_name,last_name", (ACADEMY_ID,))
         user_labels={f"{a['first_name']} {a['last_name']} · {a['email']} · {a['role']}":a for a in users}
         account=user_labels[st.selectbox("Избери потребител",list(user_labels),key="admin_selected_rights_user")]
         with st.container(border=True):
-            roles = ["parent", "coach", "admin"]
+            roles = ["parent", "coach", "specialist", "admin"]
             role = st.selectbox("Роля", roles, index=roles.index(account["role"]) if account["role"] in roles else 0, key=f"role_{account['id']}")
             active = st.checkbox("Активен профил", value=account["active"], key=f"active_{account['id']}")
             if st.button("Запази права", key=f"rights_{account['id']}", use_container_width=True):
@@ -2769,6 +2976,8 @@ def admin_panel(user):
 
     elif sec == "Управление тренировки":
         admin_training_resources(user)
+    elif sec == "Кондиционен екип":
+        admin_specialist_manager(user)
     elif sec == "Съобщения":
         teams = fetchall("SELECT * FROM teams WHERE academy_id=%s AND active ORDER BY birth_year", (ACADEMY_ID,)); tmap = {t["name"]: t["id"] for t in teams}
         with st.form("msg_form"):
@@ -3100,6 +3309,8 @@ def render_app():
             admin_panel(user)
         elif user["role"] == "coach":
             coach_panel(user)
+        elif user["role"] == "specialist":
+            specialist_panel(user)
         else:
             parent_panel(user)
 
