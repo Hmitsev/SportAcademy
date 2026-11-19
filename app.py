@@ -2332,7 +2332,8 @@ def parent_panel(user):
             with st.container(border=True): st.subheader(r["title"]); st.write(r["body"]); st.caption(r["created_at"].strftime("%d.%m.%Y %H:%M"))
         if not rows: st.info("Няма съобщения.")
     elif page=="Такси":
-        finance_view=st.radio("Такси и Поръчки",["💰 Месечни такси","🛍️ Екипировка / Аксесоари"],horizontal=True,key=f"parent_finance_view_{child['id']}",label_visibility="collapsed")
+        st.button("🔒 Екипировка / Аксесоари · предстои",key=f"parent_shop_locked_{child['id']}",use_container_width=True,disabled=True,help="Секцията е временно заключена. Логиката и данните са запазени.")
+        finance_view="💰 Месечни такси"
         if finance_view=="🛍️ Екипировка / Аксесоари":
             product_catalog_parent(user,child)
             return
@@ -2828,7 +2829,7 @@ def specialist_panel(user):
     teams=specialist_teams(user["id"])
     st.sidebar.markdown(avatar_html(profile.get("profile_image"),profile.get("profile_image_mime"),72),unsafe_allow_html=True)
     st.sidebar.caption(f"{profile['display_name']} · {specialist_role_label(profile['specialist_type'])}")
-    sections=["Табло","Тренировки","Мачове","🏆 Резултати","🛍️ Екипировка / Аксесоари","Съобщения","Информация","Статистика"]
+    sections=["Табло","Тренировки","Мачове","🏆 Резултати","Съобщения","Информация","Статистика"]
     sec=st.sidebar.radio("Меню",sections,key="specialist_menu")
     if not teams:st.info("Все още няма зачислени набори към този профил.");return
     tmap={t["name"]:t for t in teams};team=tmap[st.selectbox("Набор",list(tmap),key="specialist_team")]
@@ -2944,7 +2945,7 @@ def admin_dyulgerov_panel(user):
     teams=fetchall("SELECT * FROM teams WHERE academy_id=%s AND active ORDER BY birth_year,name",(ACADEMY_ID,))
     if not teams: st.info("Няма активни набори."); return
     tmap={t["name"]:t for t in teams}; team=tmap[st.selectbox("Набор",list(tmap),key="dyulgerov_team")]
-    view=st.radio("Меню",["Табло","🏃 Тренировъчен график","📅 Създаден график","⚽ Създаване МАЧ","Мачове","🏆 Резултати","🛍️ Екипировка / Аксесоари","Съобщение"],horizontal=True,key="dyulgerov_view",label_visibility="collapsed")
+    view=st.radio("Меню",["Табло","🏃 Тренировъчен график","📅 Създаден график","⚽ Създаване МАЧ","Мачове","🏆 Резултати","Съобщение"],horizontal=True,key="dyulgerov_view",label_visibility="collapsed")
     if view=="Табло":
         players=fetchone("SELECT COUNT(*) c FROM players WHERE academy_id=%s AND team_id=%s AND active AND approval_status='approved'",(ACADEMY_ID,team["id"]))["c"]
         upcoming=fetchone("SELECT COUNT(*) c FROM events WHERE academy_id=%s AND team_id=%s AND starts_at>=NOW() AND status<>'cancelled'",(ACADEMY_ID,team["id"]))["c"]
@@ -3305,12 +3306,7 @@ def admin_panel(user):
             st.session_state.admin_fee_page="Начисляване"; st.rerun()
         if b2.button("📊 Справка и плащания",use_container_width=True,type="primary" if st.session_state.admin_fee_page=="Справка" else "secondary"):
             st.session_state.admin_fee_page="Справка"; st.rerun()
-        b3.button(
-            "🔒 Екипировка / Аксесоари · предстои",
-            use_container_width=True,
-            disabled=True,
-            help="Секцията е временно заключена."
-        )
+        b3.button("🔒 Екипировка / Аксесоари · предстои",use_container_width=True,disabled=True,help="Секцията е временно заключена. Цялата логика остава в кода.")
         if b4.button("🧾 Разход",use_container_width=True,type="primary" if st.session_state.admin_fee_page=="Разход" else "secondary"):
             st.session_state.admin_fee_page="Разход"; st.rerun()
 
@@ -3411,7 +3407,7 @@ def coach_panel(user):
         return
     st.sidebar.markdown(avatar_html(coach.get("profile_image"),coach.get("profile_image_mime"),72),unsafe_allow_html=True)
     st.sidebar.caption(coach["display_name"])
-    sections = ["Табло", "Тренировки и мачове", "Упражнения", "Присъствие", "Такси", "🛍️ Екипировка / Аксесоари", "Съобщения", "Обратна връзка"]
+    sections = ["Табло", "Тренировки и мачове", "Упражнения", "Присъствие", "Такси", "Съобщения", "Обратна връзка"]
     sec = st.sidebar.radio("Треньорско меню", sections)
     tmap = {t["name"]: t for t in teams}
     team_name = st.selectbox("Набор", list(tmap), key="coach_selected_team")
