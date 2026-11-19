@@ -3359,11 +3359,12 @@ def coach_panel(user):
     elif sec == "Тренировки и мачове":
         suite_section=st.radio(
             "Избор",
-            ["🏃 Тренировъчен график","📅 Създаден график","⚽ Създаване МАЧ","🧩 Match Day","📊 Статистика","🏆 Резултати","⚽ Група за мача"],
+            ["🏃 Тренировъчен график","📅 Създаден график","⚽ Създаване МАЧ","⚽ Група за мача","🧩 Match Day","📊 Статистика","🏆 Резултати"],
             horizontal=True,
             key=f"coach_training_match_suite_{team['id']}",
             label_visibility="collapsed",
         )
+        squad_section=None
         if suite_section == "🏃 Тренировъчен график":
             multi_date_event_form("coach_training_form",teams,user["id"],fixed_team_id=team["id"],event_mode="training")
         elif suite_section == "📅 Създаден график":
@@ -3377,7 +3378,7 @@ def coach_panel(user):
             results_statistics_panel(team)
         elif suite_section == "📊 Статистика":
             coach_player_statistics(user,team)
-        else:
+        elif suite_section == "⚽ Група за мача":
             squad_section="⚽ Група за мача"
         if squad_section == "⚽ Група за мача":
             matches = fetchall(
