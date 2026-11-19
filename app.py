@@ -2757,6 +2757,42 @@ def admin_specialist_manager(admin_user):
                 if send and subject.strip() and body.strip():
                     execute("INSERT INTO specialist_messages(academy_id,specialist_user_id,sender_user_id,subject,body) VALUES(%s,%s,%s,%s,%s)",(ACADEMY_ID,sp["user_id"],admin_user["id"],subject.strip(),body.strip()));create_notification(sp["user_id"],"specialist_message",subject.strip(),body.strip());set_flash("✅ Съобщението е изпратено.");st.rerun()
 
+def admin_dyulgerov_panel(user):
+    st.subheader("🦁 Дюлгеров")
+    st.caption("Собственически и спортно-технически достъп през Admin профила, без отделен Coach или Specialist вход.")
+    teams=fetchall("SELECT * FROM teams WHERE academy_id=%s AND active ORDER BY birth_year,name",(ACADEMY_ID,))
+    if not teams: st.info("Няма активни набори."); return
+    tmap={t["name"]:t for t in teams}; team=tmap[st.selectbox("Набор",list(tmap),key="dyulgerov_team")]
+    view=st.radio("Меню",["Табло","Тренировки","Мачове","Съобщение","Тренировки и мачове"],horizontal=True,key="dyulgerov_view",label_visibility="collapsed")
+    if view=="Табло":
+        players=fetchone("SELECT COUNT(*) c FROM players WHERE academy_id=%s AND team_id=%s AND active AND approval_status='approved'",(ACADEMY_ID,team["id"]))["c"]
+        upcoming=fetchone("SELECT COUNT(*) c FROM events WHERE academy_id=%s AND team_id=%s AND starts_at>=NOW() AND status<>'cancelled'",(ACADEMY_ID,team["id"]))["c"]
+        messages=fetchone("SELECT COUNT(*) c FROM team_messages WHERE academy_id=%s AND team_id=%s",(ACADEMY_ID,team["id"]))["c"]
+        c1,c2,c3=st.columns(3);c1.metric("Деца",players);c2.metric("Предстоящи събития",upcoming);c3.metric("Съобщения",messages)
+    elif view in ("Тренировки","Мачове"):
+        typ="training" if view=="Тренировки" else "match"
+        rows=fetchall("SELECT * FROM events WHERE academy_id=%s AND team_id=%s AND event_type=%s AND status<>'cancelled' ORDER BY starts_at DESC LIMIT 100",(ACADEMY_ID,team["id"],typ))
+        for row in rows:
+            with st.container(border=True):
+                st.write(f"**{row['title']} · {row['starts_at']:%d.%m.%Y %H:%M}**")
+                if row.get("opponent"): st.write(f"Противник: {row['opponent']}")
+                st.caption(row.get("location") or "Без посочено място")
+                if row.get("description"): st.info(row["description"])
+        if not rows: st.info("Няма добавени събития.")
+    elif view=="Съобщение":
+        with st.form(f"dyulgerov_message_{team['id']}",clear_on_submit=True):
+            title=st.text_input("Заглавие"); body=st.text_area("Съобщение към родителите"); send=st.form_submit_button("Изпрати към групата",use_container_width=True,type="primary")
+        if send and title.strip() and body.strip():
+            execute("INSERT INTO team_messages(academy_id,team_id,sender_user_id,title,body) VALUES(%s,%s,%s,%s,%s)",(ACADEMY_ID,team["id"],user["id"],title.strip(),body.strip()))
+            notify_team_parents(team["id"],"message",title.strip(),body.strip()); set_flash("✅ Съобщението е изпратено."); st.rerun()
+        st.divider(); st.subheader("Архив")
+        for row in fetchall("SELECT * FROM team_messages WHERE academy_id=%s AND team_id=%s ORDER BY created_at DESC",(ACADEMY_ID,team["id"])):
+            with st.container(border=True):
+                st.write(f"**{row['title']}**"); st.write(row['body']); st.caption(row['created_at'].strftime('%d.%m.%Y %H:%M'))
+                if st.button("🗑️ Изтрий",key=f"dyulgerov_delete_{row['id']}"): execute("DELETE FROM team_messages WHERE academy_id=%s AND id=%s",(ACADEMY_ID,row["id"])); st.rerun()
+    else:
+        multi_date_event_form("dyulgerov_event_form",teams,user["id"],fixed_team_id=team["id"])
+
 def admin_panel(user):
     count = unread_notification_count(user["id"])
     st.title("Административен панел")
@@ -2765,7 +2801,7 @@ def admin_panel(user):
         with st.expander(f"🔔 {count} нови известия", expanded=False):
             notification_center(user)
     sections = ["Табло", "Регистрации", "Деца и групи", "Треньори и набори", "Роли и права",
-                "Тренировки и мачове", "Управление тренировки", "Кондиционен екип", "Съобщения", "Финанси", "Информация"]
+                "Дюлгеров", "Управление тренировки", "Кондиционен екип", "Финанси", "Информация"]
     sec = st.sidebar.radio("Админ меню", sections)
 
     if sec == "Табло":
@@ -3020,34 +3056,12 @@ def admin_panel(user):
                         st.success(f"Профилът {account['email']} е изтрит окончателно.")
                         st.rerun()
 
-    elif sec == "Тренировки и мачове":
-        teams = fetchall("SELECT * FROM teams WHERE academy_id=%s AND active ORDER BY birth_year", (ACADEMY_ID,))
-        multi_date_event_form("admin_event_form", teams, user["id"])
-
+    elif sec == "Дюлгеров":
+        admin_dyulgerov_panel(user)
     elif sec == "Управление тренировки":
         admin_training_resources(user)
     elif sec == "Кондиционен екип":
         admin_specialist_manager(user)
-    elif sec == "Съобщения":
-        teams = fetchall("SELECT * FROM teams WHERE academy_id=%s AND active ORDER BY birth_year", (ACADEMY_ID,)); tmap = {t["name"]: t["id"] for t in teams}
-        with st.form("msg_form"):
-            team = st.selectbox("Набор", list(tmap)); title = st.text_input("Заглавие"); body = st.text_area("Съобщение"); send = st.form_submit_button("Изпрати към групата", use_container_width=True)
-        if send and title.strip() and body.strip():
-            execute("INSERT INTO team_messages(academy_id,team_id,sender_user_id,title,body) VALUES(%s,%s,%s,%s,%s)", (ACADEMY_ID,tmap[team],user["id"],title.strip(),body.strip()))
-            notify_team_parents(tmap[team], "message", title.strip(), body.strip())
-            st.success("Съобщението е добавено в архива.")
-            st.rerun()
-        st.divider(); st.subheader("Архив на съобщенията")
-        archive_team = st.selectbox("Покажи архив за набор", list(tmap), key="admin_message_archive_team")
-        rows = fetchall("SELECT * FROM team_messages WHERE academy_id=%s AND team_id=%s ORDER BY created_at DESC", (ACADEMY_ID,tmap[archive_team]))
-        for row in rows:
-            with st.container(border=True):
-                st.write(f"**{row['title']}**"); st.write(row['body']); st.caption(row['created_at'].strftime('%d.%m.%Y %H:%M'))
-                if st.button("🗑️ Изтрий това съобщение", key=f"delete_team_message_{row['id']}"):
-                    execute("DELETE FROM team_messages WHERE academy_id=%s AND id=%s", (ACADEMY_ID,row['id']))
-                    st.rerun()
-        if not rows: st.info("Архивът е празен.")
-
     elif sec == "Финанси":
         st.session_state.setdefault("admin_fee_page", "Начисляване")
         b1,b2,b3,b4=st.columns(4)
