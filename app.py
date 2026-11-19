@@ -3,6 +3,9 @@ import io
 import base64
 import hashlib
 import secrets
+import smtplib
+import ssl
+from email.message import EmailMessage
 import pandas as pd
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
@@ -362,6 +365,16 @@ def init_db():
             last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""",
         """CREATE INDEX IF NOT EXISTS idx_login_sessions_token ON login_sessions(token_hash,last_seen)""",
+        """CREATE TABLE IF NOT EXISTS password_reset_codes(
+            id BIGSERIAL PRIMARY KEY,
+            academy_id BIGINT NOT NULL REFERENCES academies(id) ON DELETE CASCADE,
+            user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            code_hash TEXT NOT NULL,
+            expires_at TIMESTAMPTZ NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            used_at TIMESTAMPTZ,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""",
+        """CREATE INDEX IF NOT EXISTS idx_password_reset_user ON password_reset_codes(academy_id,user_id,created_at DESC)""",
         """CREATE TABLE IF NOT EXISTS coach_teams(
             academy_id BIGINT NOT NULL REFERENCES academies(id) ON DELETE CASCADE,
             coach_id BIGINT NOT NULL REFERENCES coaches(id) ON DELETE CASCADE,
@@ -1732,6 +1745,85 @@ def register_parent():
             st.success("Регистрацията е изпратена. Администраторът трябва да одобри профила и да свърже децата с група.")
         except Exception as exc: st.error("Имейлът вече е използван или данните са невалидни.")
 
+def send_password_reset_email(recipient,code):
+    smtp_host=st.secrets.get("SMTP_HOST",os.getenv("SMTP_HOST",""))
+    smtp_port=int(st.secrets.get("SMTP_PORT",os.getenv("SMTP_PORT","587")))
+    smtp_user=st.secrets.get("SMTP_USER",os.getenv("SMTP_USER",""))
+    smtp_password=st.secrets.get("SMTP_PASSWORD",os.getenv("SMTP_PASSWORD",""))
+    smtp_from=st.secrets.get("SMTP_FROM",os.getenv("SMTP_FROM",smtp_user))
+    smtp_name=st.secrets.get("SMTP_FROM_NAME",os.getenv("SMTP_FROM_NAME","Dyulgerov Academy"))
+    if not smtp_host or not smtp_user or not smtp_password or not smtp_from:
+        raise RuntimeError("Липсват SMTP настройки в Streamlit secrets / Render environment variables.")
+    msg=EmailMessage();msg["Subject"]="Код за възстановяване на парола";msg["From"]=f"{smtp_name} <{smtp_from}>";msg["To"]=recipient
+    msg.set_content(f"""Здравейте,
+
+Получихме заявка за възстановяване на паролата Ви в Dyulgerov Academy.
+
+Вашият еднократен код е: {code}
+
+Кодът е валиден 15 минути. Ако не сте направили заявката, игнорирайте този имейл.
+
+Dyulgerov Academy""")
+    context=ssl.create_default_context()
+    if smtp_port==465:
+        with smtplib.SMTP_SSL(smtp_host,smtp_port,context=context,timeout=20) as server:
+            server.login(smtp_user,smtp_password);server.send_message(msg)
+    else:
+        with smtplib.SMTP(smtp_host,smtp_port,timeout=20) as server:
+            server.ehlo();server.starttls(context=context);server.ehlo();server.login(smtp_user,smtp_password);server.send_message(msg)
+
+def password_reset_view():
+    st.subheader("🔑 Възстановяване на парола")
+    stage=st.session_state.get("password_reset_stage","request")
+    if stage=="request":
+        with st.form("password_reset_request"):
+            email=st.text_input("Регистрационен имейл").strip().lower()
+            request_code=st.form_submit_button("Изпрати код",use_container_width=True,type="primary")
+        if request_code:
+            user=fetchone("SELECT id,email,active FROM users WHERE academy_id=%s AND lower(email)=lower(%s)",(ACADEMY_ID,email))
+            if user and user.get("active"):
+                recent=fetchone("SELECT created_at FROM password_reset_codes WHERE academy_id=%s AND user_id=%s ORDER BY created_at DESC LIMIT 1",(ACADEMY_ID,user["id"]))
+                if recent and (datetime.now(recent["created_at"].tzinfo)-recent["created_at"]).total_seconds()<60:
+                    st.warning("Изчакайте 60 секунди преди да поискате нов код.");return
+                code=f"{secrets.randbelow(1000000):06d}"
+                execute("UPDATE password_reset_codes SET used_at=NOW() WHERE academy_id=%s AND user_id=%s AND used_at IS NULL",(ACADEMY_ID,user["id"]))
+                reset_id=execute("""INSERT INTO password_reset_codes(academy_id,user_id,code_hash,expires_at)
+                    VALUES(%s,%s,%s,NOW()+INTERVAL '15 minutes') RETURNING id""",(ACADEMY_ID,user["id"],hash_password(code)),True)["id"]
+                try:
+                    send_password_reset_email(user["email"],code)
+                    st.session_state.password_reset_stage="verify";st.session_state.password_reset_id=reset_id;st.session_state.password_reset_email=user["email"]
+                    st.success("Кодът е изпратен. Проверете и папка Spam/Junk.");st.rerun()
+                except Exception as exc:
+                    execute("UPDATE password_reset_codes SET used_at=NOW() WHERE id=%s",(reset_id,));st.error(f"Имейлът не беше изпратен: {exc}")
+            else:
+                st.success("Ако имейлът е регистриран, ще получите код за възстановяване.")
+    else:
+        st.caption(f"Кодът е изпратен на {st.session_state.get('password_reset_email','регистрационния имейл')} и е валиден 15 минути.")
+        with st.form("password_reset_verify"):
+            code=st.text_input("6-цифрен код",max_chars=6)
+            new_password=st.text_input("Нова парола",type="password")
+            repeat_password=st.text_input("Повтори новата парола",type="password")
+            change=st.form_submit_button("Смени паролата",use_container_width=True,type="primary")
+        if change:
+            reset=fetchone("""SELECT prc.*,u.email FROM password_reset_codes prc JOIN users u ON u.id=prc.user_id
+                WHERE prc.id=%s AND prc.academy_id=%s""",(st.session_state.get("password_reset_id"),ACADEMY_ID))
+            if not reset or reset.get("used_at") or reset["expires_at"]<datetime.now(reset["expires_at"].tzinfo):st.error("Кодът е изтекъл. Поискайте нов код.")
+            elif reset["attempts"]>=5:st.error("Кодът е блокиран след 5 неуспешни опита. Поискайте нов.")
+            elif reset["code_hash"]!=hash_password(code.strip()):
+                execute("UPDATE password_reset_codes SET attempts=attempts+1 WHERE id=%s",(reset["id"],));st.error("Невалиден код.")
+            elif len(new_password)<8:st.error("Новата парола трябва да е минимум 8 символа.")
+            elif new_password!=repeat_password:st.error("Двете пароли не съвпадат.")
+            else:
+                with db() as conn,conn.cursor() as cur:
+                    cur.execute("UPDATE users SET password_hash=%s WHERE academy_id=%s AND id=%s",(hash_password(new_password),ACADEMY_ID,reset["user_id"]))
+                    cur.execute("UPDATE password_reset_codes SET used_at=NOW() WHERE id=%s",(reset["id"],))
+                    cur.execute("DELETE FROM login_sessions WHERE academy_id=%s AND user_id=%s",(ACADEMY_ID,reset["user_id"]))
+                for key in ["password_reset_stage","password_reset_id","password_reset_email"]:st.session_state.pop(key,None)
+                st.success("Паролата е сменена успешно. Вече можете да влезете с новата парола.")
+        if st.button("← Поискай нов код",use_container_width=True):
+            for key in ["password_reset_stage","password_reset_id","password_reset_email"]:st.session_state.pop(key,None)
+            st.rerun()
+
 def login():
     with st.form("login_form"):
         email=st.text_input("Имейл").strip().lower(); pw=st.text_input("Парола",type="password")
@@ -2758,8 +2850,16 @@ def admin_specialist_manager(admin_user):
                     execute("INSERT INTO specialist_messages(academy_id,specialist_user_id,sender_user_id,subject,body) VALUES(%s,%s,%s,%s,%s)",(ACADEMY_ID,sp["user_id"],admin_user["id"],subject.strip(),body.strip()));create_notification(sp["user_id"],"specialist_message",subject.strip(),body.strip());set_flash("✅ Съобщението е изпратено.");st.rerun()
 
 def admin_dyulgerov_panel(user):
-    st.subheader("🦁 Дюлгеров")
-    st.caption("Собственически и спортно-технически достъп през Admin профила, без отделен Coach или Specialist вход.")
+    owner_coach=fetchone("""SELECT c.* FROM coaches c WHERE c.academy_id=%s AND c.user_id=%s ORDER BY c.active DESC,c.id LIMIT 1""",(ACADEMY_ID,user["id"]))
+    title_col,photo_col=st.columns([5,1])
+    with title_col:
+        st.subheader("🦁 Дюлгеров")
+        st.caption("Собственически и спортно-технически достъп през Admin профила, без отделен Coach или Specialist вход.")
+    with photo_col:
+        if owner_coach and owner_coach.get("profile_image"):
+            st.markdown(avatar_html(owner_coach.get("profile_image"),owner_coach.get("profile_image_mime"),92),unsafe_allow_html=True)
+        else:
+            st.markdown(avatar_html(None,None,92),unsafe_allow_html=True)
     teams=fetchall("SELECT * FROM teams WHERE academy_id=%s AND active ORDER BY birth_year,name",(ACADEMY_ID,))
     if not teams: st.info("Няма активни набори."); return
     tmap={t["name"]:t for t in teams}; team=tmap[st.selectbox("Набор",list(tmap),key="dyulgerov_team")]
@@ -3341,7 +3441,8 @@ def render_app():
 
         tab1, tab2 = st.tabs([
             "Вход",
-            "Регистрация на родител"
+            "Регистрация на родител",
+            "Забравена парола"
         ])
 
         with tab1:
