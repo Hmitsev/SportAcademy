@@ -550,13 +550,13 @@ def init_db():
     return academy_id
 
 try:
-    ACADEMY_ID = init_db()
+    ACADEMY_ID = _retry_db_call(init_db, attempts=3)
 
 except (psycopg2.OperationalError, psycopg2.InterfaceError):
     st.markdown("## 🔄 Връзката беше прекъсната")
     st.info(
-        "Приложението е било неактивно известно време. "
-        "Моля, рефрешнете страницата, за да продължите."
+        "Временна връзка с базата данни беше прекъсната. "
+        "Натиснете „Опитай отново“ за ново автоматично свързване."
     )
 
     if st.button(
@@ -610,13 +610,13 @@ def run_one_time_match_test_reset():
         return True
 
 try:
-    run_one_time_match_test_reset()
+    _retry_db_call(run_one_time_match_test_reset, attempts=3)
 
 except (psycopg2.OperationalError, psycopg2.InterfaceError):
     st.markdown("## 🔄 Връзката беше прекъсната")
     st.info(
-        "Приложението е било неактивно известно време. "
-        "Моля, рефрешнете страницата, за да продължите."
+        "Временна връзка с базата данни беше прекъсната. "
+        "Натиснете „Опитай отново“ за ново автоматично свързване."
     )
 
     if st.button(
@@ -743,14 +743,14 @@ def run_final_test_data_reset():
 
 
 try:
-    run_final_test_data_reset()
+    _retry_db_call(run_final_test_data_reset, attempts=3)
 
 except (psycopg2.OperationalError, psycopg2.InterfaceError):
 
     st.markdown("## 🔄 Връзката беше прекъсната")
 
     st.info(
-        "Моля, рефрешнете страницата, за да продължите."
+        "Натиснете „Опитай отново“ за ново автоматично свързване."
     )
 
     if st.button(
@@ -1156,6 +1156,8 @@ def current_user():
         st.session_state.session_touch_ts=now_ts
     st.session_state.user_id = session["id"]
     st.session_state.login_token = token
+    if st.query_params.get("session") != token:
+        st.query_params["session"] = token
     return session
 
 def create_notification(user_id, notification_type, title, body=""):
@@ -3469,7 +3471,7 @@ try:
 except (psycopg2.OperationalError, psycopg2.InterfaceError):
     # Hide the technical PostgreSQL/SSL traceback from end users.
     st.markdown("## 🔄 Връзката беше прекъсната")
-    st.info("Приложението е било неактивно известно време. Моля, рефрешнете страницата, за да продължите.")
+    st.info("Временна връзка с базата данни беше прекъсната. Приложението вече направи автоматични опити за възстановяване.")
     if st.button("🔄 Опитай отново", use_container_width=True, type="primary"):
         reset_db_pool()
         st.rerun()
