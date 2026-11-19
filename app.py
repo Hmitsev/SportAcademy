@@ -105,12 +105,17 @@ def db():
     try:
         conn = db_pool.getconn()
 
-        # Не използваме затворена PostgreSQL връзка.
+        # Не използваме затворена или прекъсната PostgreSQL връзка.
         if conn.closed:
             broken = True
-            raise psycopg2.InterfaceError(
-                "Получена е затворена PostgreSQL връзка."
-            )
+            raise psycopg2.InterfaceError("Получена е затворена PostgreSQL връзка.")
+        try:
+            with conn.cursor() as health_cursor:
+                health_cursor.execute("SELECT 1")
+                health_cursor.fetchone()
+        except (psycopg2.OperationalError, psycopg2.InterfaceError):
+            broken = True
+            raise
 
         yield conn
 
@@ -152,12 +157,16 @@ def db():
 
 
 def reset_db_pool():
-    """Discard stale PostgreSQL connections after network/SSL failures."""
+    """Close every old PostgreSQL connection, then discard only the cached pool."""
     try:
-        pool.clear()
-    except Exception:
+        cached_pool = pool()
         try:
-            st.cache_resource.clear()
+            cached_pool.closeall()
+        except Exception:
+            pass
+    finally:
+        try:
+            pool.clear()
         except Exception:
             pass
 
@@ -171,7 +180,7 @@ def _retry_db_call(operation, attempts=3):
             last_error = exc
             reset_db_pool()
             if attempt < attempts - 1:
-                time.sleep(0.35 * (attempt + 1))
+                time.sleep(0.75 * (attempt + 1))
     raise last_error
 
 
@@ -1144,7 +1153,10 @@ def current_user():
         (ACADEMY_ID, session_token_hash(token)),
     )
     if not session:
-        execute("DELETE FROM login_sessions WHERE token_hash=%s", (session_token_hash(token),))
+        try:
+            execute("DELETE FROM login_sessions WHERE token_hash=%s", (session_token_hash(token),))
+        except (psycopg2.OperationalError, psycopg2.InterfaceError):
+            pass
         st.session_state.pop("user_id", None)
         st.session_state.pop("login_token", None)
         st.query_params.pop("session", None)
