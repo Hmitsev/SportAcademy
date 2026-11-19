@@ -2438,15 +2438,17 @@ def save_events_for_dates(user_id, team_id, event_type, title, dates, event_time
             created += 1
     return created
 
-def multi_date_event_form(form_key, teams, user_id, fixed_team_id=None):
+def multi_date_event_form(form_key, teams, user_id, fixed_team_id=None, event_mode=None):
     tmap = {t["name"]: t["id"] for t in teams}
-    typ = st.radio(
-        "Какво добавяш?",
-        ["training", "match"],
-        format_func=lambda x: "🏃 Тренировъчен график" if x == "training" else "⚽ Единичен мач",
-        horizontal=True,
-        key=f"{form_key}_type",
-    )
+    typ = event_mode
+    if typ is None:
+        typ = st.radio(
+            "Какво добавяш?",
+            ["training", "match"],
+            format_func=lambda x: "🏃 Тренировъчен график" if x == "training" else "⚽ Създаване МАЧ",
+            horizontal=True,
+            key=f"{form_key}_type",
+        )
 
     if typ == "training":
         st.success("🏃 Създаване на повтарящ се тренировъчен график")
@@ -2561,7 +2563,7 @@ def multi_date_event_form(form_key, teams, user_id, fixed_team_id=None):
                 set_flash(f"✅ Графикът е публикуван. Уведомени родители: {notified}.");st.rerun()
 
     else:
-        st.info("⚽ Създаване на единичен мач")
+        st.info("⚽ Създаване МАЧ")
         with st.form(f"{form_key}_single_match"):
             if fixed_team_id is None:
                 team_name = st.selectbox("Набор", list(tmap), key=f"{form_key}_match_team")
@@ -2883,35 +2885,35 @@ def admin_dyulgerov_panel(user):
     with title_col:
         st.subheader("Дюлгеров")
         st.caption("Собственически и спортно-технически достъп през Admin профила, без отделен Coach или Specialist вход.")
-        with st.expander("📷 Профилна снимка",expanded=not bool(owner_profile.get("profile_image"))):
-            owner_image=st.file_uploader("Качи снимка",type=["jpg","jpeg","png","webp"],key="dyulgerov_direct_photo_upload")
-            if st.button("💾 Запази снимката",key="dyulgerov_direct_photo_save",use_container_width=True):
-                image_bytes,image_mime=valid_profile_image(owner_image)
-                if image_bytes:
-                    execute("UPDATE users SET profile_image=%s,profile_image_mime=%s WHERE academy_id=%s AND id=%s",(image_bytes,image_mime,ACADEMY_ID,user["id"]))
-                    set_flash("✅ Снимката на Дюлгеров е запазена.")
-                    st.rerun()
     with photo_col:
         st.markdown(avatar_html(owner_profile.get("profile_image"),owner_profile.get("profile_image_mime"),92),unsafe_allow_html=True)
     teams=fetchall("SELECT * FROM teams WHERE academy_id=%s AND active ORDER BY birth_year,name",(ACADEMY_ID,))
     if not teams: st.info("Няма активни набори."); return
     tmap={t["name"]:t for t in teams}; team=tmap[st.selectbox("Набор",list(tmap),key="dyulgerov_team")]
-    view=st.radio("Меню",["Табло","Тренировки","Мачове","Съобщение","Тренировки и мачове"],horizontal=True,key="dyulgerov_view",label_visibility="collapsed")
+    view=st.radio("Меню",["Табло","🏃 Тренировъчен график","📅 Създаден график","⚽ Създаване МАЧ","Мачове","🏆 Резултати","Съобщение"],horizontal=True,key="dyulgerov_view",label_visibility="collapsed")
     if view=="Табло":
         players=fetchone("SELECT COUNT(*) c FROM players WHERE academy_id=%s AND team_id=%s AND active AND approval_status='approved'",(ACADEMY_ID,team["id"]))["c"]
         upcoming=fetchone("SELECT COUNT(*) c FROM events WHERE academy_id=%s AND team_id=%s AND starts_at>=NOW() AND status<>'cancelled'",(ACADEMY_ID,team["id"]))["c"]
         messages=fetchone("SELECT COUNT(*) c FROM team_messages WHERE academy_id=%s AND team_id=%s",(ACADEMY_ID,team["id"]))["c"]
         c1,c2,c3=st.columns(3);c1.metric("Деца",players);c2.metric("Предстоящи събития",upcoming);c3.metric("Съобщения",messages)
-    elif view in ("Тренировки","Мачове"):
-        typ="training" if view=="Тренировки" else "match"
-        rows=fetchall("SELECT * FROM events WHERE academy_id=%s AND team_id=%s AND event_type=%s AND status<>'cancelled' ORDER BY starts_at DESC LIMIT 100",(ACADEMY_ID,team["id"],typ))
+    elif view=="🏃 Тренировъчен график":
+        multi_date_event_form("dyulgerov_training_form",teams,user["id"],fixed_team_id=team["id"],event_mode="training")
+    elif view=="📅 Създаден график":
+        st.caption("Тук се визуализира актуално създаденият тренировъчен график за избрания набор.")
+        compact_team_training_view(team,key_prefix=f"dyulgerov_created_schedule_{team['id']}")
+    elif view=="⚽ Създаване МАЧ":
+        multi_date_event_form("dyulgerov_match_form",teams,user["id"],fixed_team_id=team["id"],event_mode="match")
+    elif view=="Мачове":
+        rows=fetchall("SELECT * FROM events WHERE academy_id=%s AND team_id=%s AND event_type='match' AND status<>'cancelled' ORDER BY starts_at DESC LIMIT 100",(ACADEMY_ID,team["id"]))
         for row in rows:
             with st.container(border=True):
                 st.write(f"**{row['title']} · {row['starts_at']:%d.%m.%Y %H:%M}**")
                 if row.get("opponent"): st.write(f"Противник: {row['opponent']}")
                 st.caption(row.get("location") or "Без посочено място")
                 if row.get("description"): st.info(row["description"])
-        if not rows: st.info("Няма добавени събития.")
+        if not rows: st.info("Няма добавени мачове.")
+    elif view=="🏆 Резултати":
+        render_results_dashboard(team,editable=False,key_prefix=f"dyulgerov_results_{team['id']}")
     elif view=="Съобщение":
         with st.form(f"dyulgerov_message_{team['id']}",clear_on_submit=True):
             title=st.text_input("Заглавие"); body=st.text_area("Съобщение към родителите"); send=st.form_submit_button("Изпрати към групата",use_container_width=True,type="primary")
@@ -2923,8 +2925,6 @@ def admin_dyulgerov_panel(user):
             with st.container(border=True):
                 st.write(f"**{row['title']}**"); st.write(row['body']); st.caption(row['created_at'].strftime('%d.%m.%Y %H:%M'))
                 if st.button("🗑️ Изтрий",key=f"dyulgerov_delete_{row['id']}"): execute("DELETE FROM team_messages WHERE academy_id=%s AND id=%s",(ACADEMY_ID,row["id"])); st.rerun()
-    else:
-        multi_date_event_form("dyulgerov_event_form",teams,user["id"],fixed_team_id=team["id"])
 
 def admin_panel(user):
     count = unread_notification_count(user["id"])
@@ -3342,7 +3342,7 @@ def coach_panel(user):
         return
     st.sidebar.markdown(avatar_html(coach.get("profile_image"),coach.get("profile_image_mime"),72),unsafe_allow_html=True)
     st.sidebar.caption(coach["display_name"])
-    sections = ["Табло", "Тренировки и мачове", "Упражнения", "Група за мача", "Присъствие", "Такси", "Съобщения", "Обратна връзка"]
+    sections = ["Табло", "Тренировки и мачове", "Упражнения", "Присъствие", "Такси", "Съобщения", "Обратна връзка"]
     sec = st.sidebar.radio("Треньорско меню", sections)
     tmap = {t["name"]: t for t in teams}
     team_name = st.selectbox("Набор", list(tmap), key="coach_selected_team")
@@ -3357,11 +3357,28 @@ def coach_panel(user):
             with st.container(border=True): player_card(player,position_edit=True,key_prefix=f"coach_{team['id']}")
         if not players: st.info("Няма потвърдени деца в този набор.")
     elif sec == "Тренировки и мачове":
-        multi_date_event_form("coach_event_form", teams, user["id"], fixed_team_id=team["id"])
-    elif sec == "Упражнения":
-        coach_exercises_panel()
-    elif sec == "Група за мача":
-        squad_section=st.radio("Избор",["⚽ Група за мача","🧩 Match Day","📊 Статистика","🏆 Резултати"],horizontal=True,key=f"coach_squad_inner_{team['id']}",label_visibility="collapsed")
+        suite_section=st.radio(
+            "Избор",
+            ["🏃 Тренировъчен график","📅 Създаден график","⚽ Създаване МАЧ","🧩 Match Day","📊 Статистика","🏆 Резултати","⚽ Група за мача"],
+            horizontal=True,
+            key=f"coach_training_match_suite_{team['id']}",
+            label_visibility="collapsed",
+        )
+        if suite_section == "🏃 Тренировъчен график":
+            multi_date_event_form("coach_training_form",teams,user["id"],fixed_team_id=team["id"],event_mode="training")
+        elif suite_section == "📅 Създаден график":
+            st.caption("Всеки нов общ график заменя стария общ график за избрания набор. Тук виждаш актуално публикувания график.")
+            compact_team_training_view(team,key_prefix=f"coach_created_schedule_{team['id']}")
+        elif suite_section == "⚽ Създаване МАЧ":
+            multi_date_event_form("coach_match_form",teams,user["id"],fixed_team_id=team["id"],event_mode="match")
+        elif suite_section == "🧩 Match Day":
+            match_day_panel(user,team)
+        elif suite_section == "🏆 Резултати":
+            results_statistics_panel(team)
+        elif suite_section == "📊 Статистика":
+            coach_player_statistics(user,team)
+        else:
+            squad_section="⚽ Група за мача"
         if squad_section == "⚽ Група за мача":
             matches = fetchall(
                 """SELECT e.* FROM events e
