@@ -2107,10 +2107,13 @@ def render_results_dashboard(team, editable=False, key_prefix="results"):
     standings_url=team.get("standings_url") or ""
     top_link_col, _ = st.columns([1.2,2.8])
     with top_link_col:
-        if standings_url:
-            st.link_button("🏆 Официално класиране",standings_url,use_container_width=True)
-        else:
-            st.caption("Няма добавен линк към класиране.")
+        st.button(
+            "🔒 Официално класиране · предстои",
+            key=f"{key_prefix}_locked_standings_{team['id']}",
+            use_container_width=True,
+            disabled=True,
+            help="Официалното класиране ще бъде активирано поетапно.",
+        )
     if editable:
         with st.expander("⚙️ Класиране",expanded=False):
             new_url=st.text_input("Линк към актуалното класиране",value=standings_url,placeholder="Напр. страница на БФС",key=f"{key_prefix}_standings_{team['id']}")
@@ -2733,6 +2736,36 @@ def specialist_statistics_panel(user,team):
     all_team_ids=[t["id"] for t in specialist_teams(user["id"])]
     export_data=specialist_statistics_excel(user["id"],all_team_ids)
     if export_data:st.download_button("📥 Excel: статистика, дати и коментари",export_data,"specialist_player_statistics.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True)
+def compact_team_training_view(team,key_prefix="specialist_training"):
+    rows=fetchall("""SELECT * FROM events WHERE academy_id=%s AND team_id=%s AND event_type='training'
+        AND status<>'cancelled' ORDER BY starts_at ASC LIMIT 100""",(ACADEMY_ID,team["id"]))
+    future=[r for r in rows if r["starts_at"]>=datetime.now(r["starts_at"].tzinfo)]
+    if not future:
+        st.info("Няма предстоящи тренировки за избрания набор.")
+        return
+    nxt=future[0]
+    st.markdown("### 🟢 Следваща тренировка")
+    with st.container(border=True):
+        st.markdown(f"## {nxt['starts_at']:%d.%m.%Y · %H:%M}")
+        st.write(f"📍 {nxt.get('location') or 'Без посочено място'}")
+    notes=[]
+    for row in future:
+        note=(row.get("description") or "").strip()
+        if note and note not in notes:notes.append(note)
+    if notes:st.info("ℹ️ "+notes[0])
+    weeks={}
+    for row in future:
+        ws=(row["starts_at"]-timedelta(days=row["starts_at"].weekday())).date()
+        weeks.setdefault(ws,[]).append(row)
+    current_week=date.today()-timedelta(days=date.today().weekday())
+    for ws,items in weeks.items():
+        with st.expander(f"📅 {ws:%d.%m} – {(ws+timedelta(days=6)):%d.%m} · {len(items)} тренировки",expanded=ws==current_week):
+            for row in items:
+                a,b,c=st.columns([2,1,4])
+                a.write(f"**{row['starts_at']:%d.%m}**")
+                b.write(f"**{row['starts_at']:%H:%M}**")
+                c.write(f"📍 {row.get('location') or 'Без място'}")
+
 def specialist_panel(user):
     profile=fetchone("SELECT * FROM specialist_profiles WHERE academy_id=%s AND user_id=%s AND active",(ACADEMY_ID,user["id"]))
     st.title("Кондиционен и поддържащ екип")
@@ -2741,7 +2774,7 @@ def specialist_panel(user):
     teams=specialist_teams(user["id"])
     st.sidebar.markdown(avatar_html(profile.get("profile_image"),profile.get("profile_image_mime"),72),unsafe_allow_html=True)
     st.sidebar.caption(f"{profile['display_name']} · {specialist_role_label(profile['specialist_type'])}")
-    sections=["Табло","Тренировки","Мачове","Съобщения","Информация","Статистика"]
+    sections=["Табло","Тренировки","Мачове","🏆 Резултати","Съобщения","Информация","Статистика"]
     sec=st.sidebar.radio("Меню",sections,key="specialist_menu")
     if not teams:st.info("Все още няма зачислени набори към този профил.");return
     tmap={t["name"]:t for t in teams};team=tmap[st.selectbox("Набор",list(tmap),key="specialist_team")]
@@ -2752,16 +2785,20 @@ def specialist_panel(user):
         st.caption("Профилът има достъп само до наборите, които са зададени от Admin.")
         unread=unread_notification_count(user["id"])
         if unread:notification_center(user)
-    elif sec in ("Тренировки","Мачове"):
-        typ="training" if sec=="Тренировки" else "match"
-        rows=fetchall("SELECT * FROM events WHERE academy_id=%s AND team_id=%s AND event_type=%s AND status<>'cancelled' ORDER BY starts_at DESC LIMIT 100",(ACADEMY_ID,team["id"],typ))
+    elif sec=="Тренировки":
+        compact_team_training_view(team,key_prefix=f"specialist_training_{team['id']}")
+    elif sec=="Мачове":
+        rows=fetchall("SELECT * FROM events WHERE academy_id=%s AND team_id=%s AND event_type='match' AND status<>'cancelled' ORDER BY starts_at DESC LIMIT 100",(ACADEMY_ID,team["id"]))
         for r in rows:
             with st.container(border=True):
                 st.write(f"**{r['title']} · {r['starts_at']:%d.%m.%Y %H:%M}**")
                 if r.get("opponent"):st.write(f"Противник: {r['opponent']}")
                 st.caption(r.get("location") or "Без посочено място")
                 if r.get("description"):st.info(r["description"])
-        if not rows:st.info("Няма добавени събития за избрания набор.")
+        if not rows:st.info("Няма добавени мачове за избрания набор.")
+    elif sec=="🏆 Резултати":
+        st.caption("Избери набор от падащото меню по-горе, за да видиш неговите резултати.")
+        render_results_dashboard(team,editable=False,key_prefix=f"specialist_results_{user['id']}_{team['id']}")
     elif sec=="Съобщения":
         rows=fetchall("""SELECT tm.*,u.first_name,u.last_name FROM team_messages tm
             LEFT JOIN users u ON u.id=tm.sender_user_id
