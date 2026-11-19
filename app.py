@@ -3305,8 +3305,12 @@ def admin_panel(user):
             st.session_state.admin_fee_page="Начисляване"; st.rerun()
         if b2.button("📊 Справка и плащания",use_container_width=True,type="primary" if st.session_state.admin_fee_page=="Справка" else "secondary"):
             st.session_state.admin_fee_page="Справка"; st.rerun()
-        if b3.button("🛍️ Екипировка / Аксесоари",use_container_width=True,type="primary" if st.session_state.admin_fee_page=="Екипировка" else "secondary"):
-            st.session_state.admin_fee_page="Екипировка"; st.rerun()
+        b3.button(
+            "🔒 Екипировка / Аксесоари · предстои",
+            use_container_width=True,
+            disabled=True,
+            help="Секцията е временно заключена."
+        )
         if b4.button("🧾 Разход",use_container_width=True,type="primary" if st.session_state.admin_fee_page=="Разход" else "secondary"):
             st.session_state.admin_fee_page="Разход"; st.rerun()
 
