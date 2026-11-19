@@ -1861,7 +1861,7 @@ def render_parent_player_development(user,child):
     if not rows:
         st.info("Все още няма публикувана месечна оценка от треньора.")
         return
-    labels=[("⚽ Техника","technique"),("🧠 Тактика","tactics"),("🏃 Физическа подготовка","physical"),("🤝 Работа в екип","teamwork"),("💪 Дисциплина","discipline"),("⭐ Старание","effort")]
+    labels=[("⚽ Техника","technique"),("📋 Тактика","tactics"),("🏃 Физическа подготовка","physical"),("🤝 Работа в екип","teamwork"),("💪 Дисциплина","discipline"),("⭐ Старание","effort")]
     available_years=sorted({int(row["evaluation_year"]) for row in rows},reverse=True)
     period_options=["Всички оценки"]+[f"{year} година" for year in available_years]
     selected_period=st.selectbox("Период за обобщената статистика",period_options,key=f"development_period_{child['id']}")
@@ -1927,7 +1927,7 @@ def coach_player_statistics(user,team):
         JOIN coaches c ON c.id=ct.coach_id
         WHERE pe.academy_id=%s AND pe.player_id=%s AND pe.team_id=%s AND pe.evaluation_year=%s AND pe.evaluation_month=%s AND c.user_id=%s AND c.active""",(ACADEMY_ID,player["id"],team["id"],year,month,user["id"]))
     if old:st.info("За този месец има запазена оценка. Промените ще обновят съществуващия запис.")
-    criteria=[("⚽ Техника","technique"),("🧠 Тактика","tactics"),("🏃 Физическа подготовка","physical"),("🤝 Работа в екип","teamwork"),("💪 Дисциплина","discipline"),("⭐ Старание / отношение към тренировките","effort")];vals={}
+    criteria=[("⚽ Техника","technique"),("📋 Тактика","tactics"),("🏃 Физическа подготовка","physical"),("🤝 Работа в екип","teamwork"),("💪 Дисциплина","discipline"),("⭐ Старание / отношение към тренировките","effort")];vals={}
     for label,field in criteria:vals[field]=st.radio(label,options=[1,2,3,4,5],index=(int(old[field])-1) if old else 2,format_func=lambda x:f"{x} ★",horizontal=True,key=f"eval_{field}_{team['id']}_{player['id']}_{year}_{month}")
     note=st.text_area("📝 Бележка от треньора",value=(old.get("coach_note") or "") if old else "",key=f"eval_note_{team['id']}_{player['id']}_{year}_{month}")
     score=sum(vals.values())/6;st.markdown(f"### Общо развитие: {score:.1f} / 5");st.write(f"**{evaluation_status(score)}**");st.caption("Статусът показва развитието за периода, а не определя детето като добър или слаб футболист.");render_attendance_stats(player["id"],team["id"],year,month)
@@ -2842,7 +2842,7 @@ def admin_dyulgerov_panel(user):
     owner_profile=fetchone("SELECT profile_image,profile_image_mime FROM users WHERE academy_id=%s AND id=%s",(ACADEMY_ID,user["id"])) or {}
     title_col,photo_col=st.columns([5,1])
     with title_col:
-        st.subheader("🦁 Дюлгеров")
+        st.subheader("Дюлгеров")
         st.caption("Собственически и спортно-технически достъп през Admin профила, без отделен Coach или Specialist вход.")
         with st.expander("📷 Профилна снимка",expanded=not bool(owner_profile.get("profile_image"))):
             owner_image=st.file_uploader("Качи снимка",type=["jpg","jpeg","png","webp"],key="dyulgerov_direct_photo_upload")
