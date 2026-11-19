@@ -3,6 +3,7 @@ import io
 import base64
 import hashlib
 import secrets
+import time
 import pandas as pd
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
@@ -150,53 +151,55 @@ def db():
                     pass
 
 
-def fetchone(q, p=()):
-    for attempt in range(2):
+def reset_db_pool():
+    """Discard stale PostgreSQL connections after network/SSL failures."""
+    try:
+        pool.clear()
+    except Exception:
         try:
-            with db() as conn:
-                with conn.cursor(
-                    cursor_factory=RealDictCursor
-                ) as cur:
-                    cur.execute(q, p)
-                    return cur.fetchone()
+            st.cache_resource.clear()
+        except Exception:
+            pass
 
-        except (
-            psycopg2.OperationalError,
-            psycopg2.InterfaceError,
-        ):
-            if attempt == 1:
-                raise
+
+def _retry_db_call(operation, attempts=3):
+    last_error = None
+    for attempt in range(attempts):
+        try:
+            return operation()
+        except (psycopg2.OperationalError, psycopg2.InterfaceError) as exc:
+            last_error = exc
+            reset_db_pool()
+            if attempt < attempts - 1:
+                time.sleep(0.35 * (attempt + 1))
+    raise last_error
+
+
+def fetchone(q, p=()):
+    def operation():
+        with db() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(q, p)
+                return cur.fetchone()
+    return _retry_db_call(operation)
 
 
 def fetchall(q, p=()):
-    for attempt in range(2):
-        try:
-            with db() as conn:
-                with conn.cursor(
-                    cursor_factory=RealDictCursor
-                ) as cur:
-                    cur.execute(q, p)
-                    return cur.fetchall()
-
-        except (
-            psycopg2.OperationalError,
-            psycopg2.InterfaceError,
-        ):
-            if attempt == 1:
-                raise
+    def operation():
+        with db() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(q, p)
+                return cur.fetchall()
+    return _retry_db_call(operation)
 
 
 def execute(q, p=(), returning=False):
-    with db() as conn:
-        with conn.cursor(
-            cursor_factory=RealDictCursor
-        ) as cur:
-            cur.execute(q, p)
-
-            if returning:
-                return cur.fetchone()
-
-            return None
+    def operation():
+        with db() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(q, p)
+                return cur.fetchone() if returning else None
+    return _retry_db_call(operation)
 
 def hash_password(value):
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
@@ -562,7 +565,7 @@ except (psycopg2.OperationalError, psycopg2.InterfaceError):
         use_container_width=True,
         type="primary",
     ):
-        st.cache_resource.clear()
+        reset_db_pool()
         st.rerun()
 
     st.stop()
@@ -622,7 +625,7 @@ except (psycopg2.OperationalError, psycopg2.InterfaceError):
         use_container_width=True,
         type="primary",
     ):
-        st.cache_resource.clear()
+        reset_db_pool()
         st.rerun()
 
     st.stop()
@@ -756,7 +759,7 @@ except (psycopg2.OperationalError, psycopg2.InterfaceError):
         use_container_width=True,
         type="primary",
     ):
-        st.cache_resource.clear()
+        reset_db_pool()
         st.rerun()
 
     st.stop()
@@ -3468,5 +3471,5 @@ except (psycopg2.OperationalError, psycopg2.InterfaceError):
     st.markdown("## 🔄 Връзката беше прекъсната")
     st.info("Приложението е било неактивно известно време. Моля, рефрешнете страницата, за да продължите.")
     if st.button("🔄 Опитай отново", use_container_width=True, type="primary"):
-        st.cache_resource.clear()
+        reset_db_pool()
         st.rerun()
