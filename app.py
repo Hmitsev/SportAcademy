@@ -2198,7 +2198,9 @@ def parent_panel(user):
             future=[r for r in rows if r["starts_at"]>=datetime.now(r["starts_at"].tzinfo)]
             nxt=future[0] if future else rows[0]
             st.markdown("### 🟢 Следваща тренировка")
-            with st.container(border=True):st.markdown(f"## {nxt['starts_at']:%d.%m.%Y · %H:%M}");st.write(f"📍 {nxt.get('location') or 'Без посочено място'}")
+            with st.container(border=True):
+                st.markdown(training_datetime_html(nxt['starts_at'],large=True),unsafe_allow_html=True)
+                st.write(f"📍 {nxt.get('location') or 'Без посочено място'}")
             notes=[]
             for r in rows:
                 n=(r.get("description") or "").strip()
@@ -2211,7 +2213,7 @@ def parent_panel(user):
             for ws,items in weeks.items():
                 with st.expander(f"📅 {ws:%d.%m} – {(ws+timedelta(days=6)):%d.%m} · {len(items)} тренировки",expanded=ws==cw):
                     for r in items:
-                        a,b,c=st.columns([2,1,4]);a.write(f"**{r['starts_at']:%d.%m}**");b.write(f"**{r['starts_at']:%H:%M}**");c.write(f"📍 {r.get('location') or 'Без място'}")
+                        a,b,c=st.columns([2,1,4]);a.markdown(training_date_html(r['starts_at']),unsafe_allow_html=True);b.write(f"**{r['starts_at']:%H:%M}**");c.write(f"📍 {r.get('location') or 'Без място'}")
         else:st.info("Няма добавени тренировки за избраното дете.")
         st.divider();show_development=st.checkbox("📊 Развитие на футболиста",False,key=f"show_development_{child['id']}")
         st.info("ℹ️ Тази статистика не е актуална. Ще бъдете уведомени от треньора, когато оценяването влезе в сила.")
@@ -2535,7 +2537,8 @@ def multi_date_event_form(form_key, teams, user_id, fixed_team_id=None, event_mo
             st.info(f"Ще бъдат създадени {len(schedule)} тренировки.")
             with st.expander("Покажи всички дати", expanded=len(schedule) <= 10):
                 for event_date, event_time, day_name in schedule:
-                    st.write(f"✅ {day_name} · {event_date:%d.%m.%Y} · {event_time:%H:%M}")
+                    preview_dt=datetime.combine(event_date,event_time)
+                    st.markdown("✅ "+training_datetime_html(preview_dt),unsafe_allow_html=True)
 
         if st.button(
             f"✅ Потвърди и създай {len(schedule)} тренировки" if schedule else "✅ Създай тренировъчния график",
@@ -2738,6 +2741,15 @@ def specialist_statistics_panel(user,team):
     all_team_ids=[t["id"] for t in specialist_teams(user["id"])]
     export_data=specialist_statistics_excel(user["id"],all_team_ids)
     if export_data:st.download_button("📥 Excel: статистика, дати и коментари",export_data,"specialist_player_statistics.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True)
+BG_DAY_INITIALS = {0:"П",1:"В",2:"С",3:"Ч",4:"П",5:"С",6:"Н"}
+def training_datetime_html(dt,large=False):
+    size = "2rem" if large else "1rem"
+    return (f'<div style="font-size:{size};font-weight:900;line-height:1.25">'
+            f'<span style="color:#39d98a!important">{BG_DAY_INITIALS[dt.weekday()]} · {dt:%d.%m.%Y}</span>'
+            f'<span style="color:#ffffff!important"> · {dt:%H:%M}</span></div>')
+def training_date_html(dt):
+    return f'<span style="color:#39d98a!important;font-weight:900">{BG_DAY_INITIALS[dt.weekday()]} · {dt:%d.%m}</span>'
+
 def compact_team_training_view(team,key_prefix="specialist_training"):
     rows=fetchall("""SELECT * FROM events WHERE academy_id=%s AND team_id=%s AND event_type='training'
         AND status<>'cancelled' ORDER BY starts_at ASC LIMIT 100""",(ACADEMY_ID,team["id"]))
@@ -2748,7 +2760,7 @@ def compact_team_training_view(team,key_prefix="specialist_training"):
     nxt=future[0]
     st.markdown("### 🟢 Следваща тренировка")
     with st.container(border=True):
-        st.markdown(f"## {nxt['starts_at']:%d.%m.%Y · %H:%M}")
+        st.markdown(training_datetime_html(nxt['starts_at'],large=True),unsafe_allow_html=True)
         st.write(f"📍 {nxt.get('location') or 'Без посочено място'}")
     notes=[]
     for row in future:
@@ -2764,7 +2776,7 @@ def compact_team_training_view(team,key_prefix="specialist_training"):
         with st.expander(f"📅 {ws:%d.%m} – {(ws+timedelta(days=6)):%d.%m} · {len(items)} тренировки",expanded=ws==current_week):
             for row in items:
                 a,b,c=st.columns([2,1,4])
-                a.write(f"**{row['starts_at']:%d.%m}**")
+                a.markdown(training_date_html(row['starts_at']),unsafe_allow_html=True)
                 b.write(f"**{row['starts_at']:%H:%M}**")
                 c.write(f"📍 {row.get('location') or 'Без място'}")
 
@@ -3287,15 +3299,6 @@ def admin_panel(user):
                 create_notification(cmap[cname],"admin_feedback","Ново съобщение от Admin",subject.strip());set_flash("✅ Съобщението е изпратено до треньора.");st.rerun()
         else: st.info("Няма активни треньорски профили.")
         st.divider()
-        st.subheader("🎬 Видео инструкция за родители")
-        current_help_video=academy().get("parent_help_video_url") or ""
-        with st.expander("⚙️ Добавяне или промяна на видеото",expanded=not bool(current_help_video)):
-            help_video_url=st.text_input("Линк към видео инструкция",value=current_help_video,key="parent_help_video_url")
-            vh1,vh2=st.columns(2)
-            if vh1.button("Запази",use_container_width=True): execute("UPDATE academies SET parent_help_video_url=%s WHERE id=%s",(help_video_url.strip() or None,ACADEMY_ID)); st.rerun()
-            if vh2.button("Премахни",use_container_width=True): execute("UPDATE academies SET parent_help_video_url=NULL WHERE id=%s",(ACADEMY_ID,)); st.rerun()
-        if current_help_video: st.video(current_help_video)
-        st.divider()
         st.subheader("📢 Информация към родители")
         with st.form("post_form"):
             title=st.text_input("Заглавие"); body=st.text_area("Текст"); typ=st.radio("Медия",["image","video"],format_func=lambda x:"Снимка" if x=="image" else "Видео линк",horizontal=True); url=st.text_input("URL за видео/снимка"); upload=st.file_uploader("Или качи снимка",type=["jpg","jpeg","png","webp"]); add_poll=st.checkbox("📊 Добави глобална анкета"); poll_question=st.text_input("Въпрос на анкетата") if add_poll else ""; send=st.form_submit_button("Добави в информационния архив",use_container_width=True)
@@ -3320,6 +3323,20 @@ def admin_panel(user):
                     execute("DELETE FROM public_posts WHERE academy_id=%s AND id=%s", (ACADEMY_ID,post['id']))
                     st.rerun()
         if not posts: st.info("Информационният архив е празен.")
+        st.divider()
+        show_video_settings=st.checkbox("🎬 Покажи настройките за видео инструкцията",value=False,key="admin_show_parent_help_video")
+        if show_video_settings:
+            current_help_video=academy().get("parent_help_video_url") or ""
+            with st.container(border=True):
+                st.subheader("🎬 Видео инструкция за родители")
+                help_video_url=st.text_input("Линк към видео инструкция",value=current_help_video,key="parent_help_video_url")
+                vh1,vh2=st.columns(2)
+                if vh1.button("Запази",use_container_width=True,key="save_parent_help_video"):
+                    execute("UPDATE academies SET parent_help_video_url=%s WHERE id=%s",(help_video_url.strip() or None,ACADEMY_ID)); academy.clear(); st.rerun()
+                if vh2.button("Премахни",use_container_width=True,key="remove_parent_help_video"):
+                    execute("UPDATE academies SET parent_help_video_url=NULL WHERE id=%s",(ACADEMY_ID,)); academy.clear(); st.rerun()
+                if current_help_video: st.video(current_help_video)
+                else: st.info("Видео инструкцията все още не е добавена.")
     else:
         notification_center(user)
 
