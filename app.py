@@ -1109,6 +1109,7 @@ def apply_style():
 
 apply_style()
 
+@st.cache_data(ttl=300,show_spinner=False)
 def academy(): return fetchone("SELECT * FROM academies WHERE id=%s",(ACADEMY_ID,))
 def session_token_hash(token):
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
@@ -1146,7 +1147,10 @@ def current_user():
         st.query_params.pop("session", None)
         return None
 
-    execute("UPDATE login_sessions SET last_seen=NOW() WHERE token_hash=%s", (session_token_hash(token),))
+    now_ts=datetime.now().timestamp()
+    if now_ts-float(st.session_state.get("session_touch_ts",0)) > 300:
+        execute("UPDATE login_sessions SET last_seen=NOW() WHERE token_hash=%s", (session_token_hash(token),))
+        st.session_state.session_touch_ts=now_ts
     st.session_state.user_id = session["id"]
     st.session_state.login_token = token
     return session
@@ -1751,7 +1755,8 @@ def parent_nav():
                 if col.button(label,key=f"pnav_{page}",use_container_width=True,type="primary" if st.session_state.parent_page==page else "secondary"):
                     st.session_state.parent_page=page; st.rerun()
 
-def parent_players(user):
+@st.cache_data(ttl=60,show_spinner=False)
+def parent_players(user_id):
     return fetchall("""SELECT p.*,t.name team_name,COALESCE(tc.coach_names,'Очаква свързване') coach_name,tc.coach_cards,
         CASE WHEN p.position='Вратар' THEN gk.goalkeeper_cards ELSE NULL END goalkeeper_cards
         FROM parent_players pp JOIN players p ON p.id=pp.player_id LEFT JOIN teams t ON t.id=p.team_id
@@ -1761,7 +1766,7 @@ def parent_players(user):
         LEFT JOIN LATERAL (SELECT JSONB_AGG(JSONB_BUILD_OBJECT('name',sp.display_name,'image',ENCODE(sp.profile_image,'base64'),'mime',COALESCE(sp.profile_image_mime,'image/jpeg')) ORDER BY sp.display_name) goalkeeper_cards
           FROM specialist_teams st JOIN specialist_profiles sp ON sp.user_id=st.specialist_user_id AND sp.active AND sp.specialist_type='goalkeeper'
           JOIN users su ON su.id=sp.user_id AND su.active WHERE st.academy_id=p.academy_id AND st.team_id=p.team_id) gk ON TRUE
-        WHERE pp.academy_id=%s AND pp.parent_user_id=%s AND p.active ORDER BY p.first_name""",(ACADEMY_ID,user["id"]))
+        WHERE pp.academy_id=%s AND pp.parent_user_id=%s AND p.active ORDER BY p.first_name""",(ACADEMY_ID,user_id))
 def profile_cards_html(cards,title):
     if not cards:return ''
     blocks=[]
@@ -2100,7 +2105,7 @@ def results_statistics_panel(team):
     render_results_dashboard(team,editable=True,key_prefix="coach_results")
 
 def parent_panel(user):
-    parent_nav(); show_flash(); players=parent_players(user)
+    parent_nav(); show_flash(); players=parent_players(user["id"])
     if not players: st.info("Няма добавени деца към профила."); return
     labels={f"{p['first_name']} {p['last_name']}":p for p in players}; chosen=st.selectbox("Избрано дете",list(labels)); child=labels[chosen]
     st.caption(f"Група: {child.get('team_name') or 'Очаква свързване'} · Треньор: {child.get('coach_name') or 'Очаква свързване'}")
@@ -2117,14 +2122,14 @@ def parent_panel(user):
             (ACADEMY_ID,),
         )
         st.markdown("### Треньорски екип")
-        st.markdown(f"""<div style="padding:16px;border-radius:18px;background:rgba(8,8,8,.72);border:1px solid rgba(214,183,101,.48)">
-        {profile_cards_html(child.get('coach_cards'),'Треньори на набора')}
-        {profile_cards_html(child.get('goalkeeper_cards'),'Треньор на вратарите') if child.get('position')=='Вратар' else ''}
-        </div>""",unsafe_allow_html=True)
+        with st.container(border=True):
+            st.markdown(profile_cards_html(child.get('coach_cards'),'Треньори на набора'),unsafe_allow_html=True)
+            if child.get('position')=='Вратар' and child.get('goalkeeper_cards'):
+                st.markdown(profile_cards_html(child.get('goalkeeper_cards'),'Треньор на вратарите'),unsafe_allow_html=True)
         fee_col,player_col=st.columns(2)
         with fee_col: st.metric("Такса",f"{academy()['default_fee']:.2f} €")
         with player_col:
-            st.markdown("**Снимка на детето**")
+            
             st.markdown(avatar_html(child.get('profile_image'),child.get('profile_image_mime'),82),unsafe_allow_html=True)
         if latest_info:
             with st.container(border=True):
