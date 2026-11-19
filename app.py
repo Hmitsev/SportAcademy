@@ -2277,7 +2277,7 @@ def parent_panel(user):
             with st.container(border=True): st.subheader(r["title"]); st.write(r["body"]); st.caption(r["created_at"].strftime("%d.%m.%Y %H:%M"))
         if not rows: st.info("Няма съобщения.")
     elif page=="Такси":
-        finance_view=st.radio("Такси и плащания",["💰 Месечни такси","🛍️ Екипировка / аксесоари"],horizontal=True,key=f"parent_finance_view_{child['id']}",label_visibility="collapsed")
+        finance_view=st.radio("Такси и Поръчки",["💰 Месечни такси","🛍️ Екипировка / аксесоари"],horizontal=True,key=f"parent_finance_view_{child['id']}",label_visibility="collapsed")
         if finance_view=="🛍️ Екипировка / аксесоари":
             product_catalog_parent(user,child)
             return
