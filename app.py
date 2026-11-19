@@ -1755,7 +1755,6 @@ def parent_nav():
                 if col.button(label,key=f"pnav_{page}",use_container_width=True,type="primary" if st.session_state.parent_page==page else "secondary"):
                     st.session_state.parent_page=page; st.rerun()
 
-@st.cache_data(ttl=60,show_spinner=False)
 def parent_players(user_id):
     return fetchall("""SELECT p.*,t.name team_name,COALESCE(tc.coach_names,'Очаква свързване') coach_name,tc.coach_cards,
         CASE WHEN p.position='Вратар' THEN gk.goalkeeper_cards ELSE NULL END goalkeeper_cards
@@ -2129,7 +2128,7 @@ def parent_panel(user):
         fee_col,player_col=st.columns(2)
         with fee_col: st.metric("Такса",f"{academy()['default_fee']:.2f} €")
         with player_col:
-            
+            st.markdown("**Снимка на детето**")
             st.markdown(avatar_html(child.get('profile_image'),child.get('profile_image_mime'),82),unsafe_allow_html=True)
         if latest_info:
             with st.container(border=True):
