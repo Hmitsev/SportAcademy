@@ -372,6 +372,9 @@ def init_db():
         """CREATE INDEX IF NOT EXISTS idx_attendance_event ON attendance(academy_id,event_id,player_id)""",
         """CREATE INDEX IF NOT EXISTS idx_players_academy_team ON players(academy_id,team_id)""",
         """CREATE INDEX IF NOT EXISTS idx_events_team_date ON events(academy_id,team_id,starts_at)""",
+        """ALTER TABLE events ADD COLUMN IF NOT EXISTS target_all_players BOOLEAN NOT NULL DEFAULT TRUE""",
+        """CREATE TABLE IF NOT EXISTS event_players(academy_id BIGINT NOT NULL REFERENCES academies(id) ON DELETE CASCADE,event_id BIGINT NOT NULL REFERENCES events(id) ON DELETE CASCADE,player_id BIGINT NOT NULL REFERENCES players(id) ON DELETE CASCADE,PRIMARY KEY(event_id,player_id))""",
+        """CREATE INDEX IF NOT EXISTS idx_event_players_player ON event_players(academy_id,player_id,event_id)""",
         """CREATE INDEX IF NOT EXISTS idx_messages_team ON team_messages(academy_id,team_id,created_at DESC)""",
         """ALTER TABLE player_fees ADD COLUMN IF NOT EXISTS payment_method TEXT""",
         """ALTER TABLE player_fees ADD COLUMN IF NOT EXISTS payment_note TEXT""",
@@ -1249,6 +1252,12 @@ def notify_team_parents(team_id, notification_type, title, body=""):
         create_notification(parent["user_id"], notification_type, title, body)
     return len(parents)
 
+
+def notify_selected_players_parents(player_ids,notification_type,title,body=""):
+    if not player_ids:return 0
+    rows=fetchall("""SELECT DISTINCT u.id user_id FROM users u JOIN parent_players pp ON pp.parent_user_id=u.id AND pp.academy_id=u.academy_id WHERE u.academy_id=%s AND u.role='parent' AND u.active AND u.account_status='approved' AND pp.player_id=ANY(%s)""",(ACADEMY_ID,player_ids))
+    for row in rows:create_notification(row["user_id"],notification_type,title,body)
+    return len(rows)
 
 def notify_admins(notification_type, title, body=""):
     admins = fetchall(
@@ -2181,28 +2190,29 @@ def parent_panel(user):
         else:
             st.info("Няма нова информация от академията.")
     elif page == "Тренировки":
-        rows=fetchall(
-            "SELECT * FROM events WHERE academy_id=%s AND team_id=%s AND event_type='training' ORDER BY starts_at ASC LIMIT 40",
-            (ACADEMY_ID,child.get("team_id")),
-        ) if child.get("team_id") else []
-        for r in rows:
-            with st.container(border=True):
-                st.markdown(
-                    f"<div class='schedule-line' style='color:#ff2020!important;font-weight:900!important;font-size:1.12rem!important;text-shadow:0 0 2px #000,0 0 8px rgba(255,0,0,.50);'>{r['title']} · {r['starts_at']:%d.%m.%Y %H:%M} · {r.get('location') or 'Без място'}</div>",
-                    unsafe_allow_html=True,
-                )
-                if r.get("description"): st.info(f"ℹ️ {r['description']}")
-        if not rows: st.info("Няма добавени тренировки.")
-        st.divider()
-        show_development=st.checkbox(
-            "📊 Развитие на футболиста",
-            value=False,
-            key=f"show_development_{child['id']}",
-            help="Отвори наличната статистика за развитието на футболиста.",
-        )
+        rows=fetchall("""SELECT e.* FROM events e WHERE e.academy_id=%s AND e.team_id=%s AND e.event_type='training' AND e.status<>'cancelled' AND (e.target_all_players OR EXISTS(SELECT 1 FROM event_players ep WHERE ep.event_id=e.id AND ep.player_id=%s)) ORDER BY e.starts_at ASC LIMIT 80""",(ACADEMY_ID,child.get("team_id"),child["id"])) if child.get("team_id") else []
+        if rows:
+            future=[r for r in rows if r["starts_at"]>=datetime.now(r["starts_at"].tzinfo)]
+            nxt=future[0] if future else rows[0]
+            st.markdown("### 🟢 Следваща тренировка")
+            with st.container(border=True):st.markdown(f"## {nxt['starts_at']:%d.%m.%Y · %H:%M}");st.write(f"📍 {nxt.get('location') or 'Без посочено място'}")
+            notes=[]
+            for r in rows:
+                n=(r.get("description") or "").strip()
+                if n and n not in notes:notes.append(n)
+            if notes:st.info("ℹ️ "+notes[0])
+            weeks={}
+            for r in rows:
+                ws=(r["starts_at"]-timedelta(days=r["starts_at"].weekday())).date();weeks.setdefault(ws,[]).append(r)
+            cw=date.today()-timedelta(days=date.today().weekday())
+            for ws,items in weeks.items():
+                with st.expander(f"📅 {ws:%d.%m} – {(ws+timedelta(days=6)):%d.%m} · {len(items)} тренировки",expanded=ws==cw):
+                    for r in items:
+                        a,b,c=st.columns([2,1,4]);a.write(f"**{r['starts_at']:%d.%m}**");b.write(f"**{r['starts_at']:%H:%M}**");c.write(f"📍 {r.get('location') or 'Без място'}")
+        else:st.info("Няма добавени тренировки за избраното дете.")
+        st.divider();show_development=st.checkbox("📊 Развитие на футболиста",False,key=f"show_development_{child['id']}")
         st.info("ℹ️ Тази статистика не е актуална. Ще бъдете уведомени от треньора, когато оценяването влезе в сила.")
-        if show_development:
-            render_parent_player_development(user,child)
+        if show_development:render_parent_player_development(user,child)
     elif page == "Мачове":
         match_view=st.radio(
             "Мачове",
@@ -2303,6 +2313,11 @@ def parent_panel(user):
                     if method=="cash":
                         st.info("💶 Изборът за плащане в брой ще бъде отразен от треньора или Admin след получаване на сумата.")
                     elif method=="bank":
+                        st.info("""🏦 **Банкова сметка**
+
+**IBAN:** BG26UBBS80021058607350  
+**Получател:** ФК ДЮЛГЕРОВ АКАДЕМИ  
+**Основание:** Име на детето и период на плащане""")
                         payment_date=st.date_input("Дата на банковия превод",date.today(),key=f"reported_date_{r['id']}_bank")
                         if st.button("📤 Изпрати банковия превод за потвърждение",key=f"report_payment_{r['id']}_bank",use_container_width=True):
                             execute("""UPDATE player_fees SET payment_method='bank',payment_reported_date=%s,
@@ -2438,6 +2453,13 @@ def multi_date_event_form(form_key, teams, user_id, fixed_team_id=None):
         else:
             team_id = fixed_team_id
 
+        team_players=fetchall("SELECT id,first_name,last_name FROM players WHERE academy_id=%s AND team_id=%s AND approval_status='approved' AND active ORDER BY first_name,last_name",(ACADEMY_ID,team_id))
+        all_children=st.checkbox("✅ Графикът е за всички деца от набора",True,key=f"{form_key}_training_all_children")
+        selected_player_ids=[p["id"] for p in team_players]
+        if not all_children:
+            selected_player_ids=st.multiselect("Избери едно или повече деца",[p["id"] for p in team_players],format_func=lambda pid:next(f"{p['first_name']} {p['last_name']}" for p in team_players if p["id"]==pid),key=f"{form_key}_selected_players")
+            if not selected_player_ids:st.warning("Избери поне едно дете.")
+        else:st.caption(f"Маркирани са всички {len(team_players)} деца от набора.")
         title = st.text_input(
             "Заглавие",
             value="Тренировка",
@@ -2515,7 +2537,7 @@ def multi_date_event_form(form_key, teams, user_id, fixed_team_id=None):
             key=f"{form_key}_save_training_schedule",
             use_container_width=True,
             type="primary",
-            disabled=not schedule,
+            disabled=not schedule or (not all_children and not selected_player_ids),
         ):
             if not title.strip():
                 st.error("Въведи заглавие.")
@@ -2524,36 +2546,16 @@ def multi_date_event_form(form_key, teams, user_id, fixed_team_id=None):
             elif end_date < start_date:
                 st.error("Провери периода.")
             else:
-                # Обновяваме само тренировките за избрания набор. Мачовете не се засягат.
-                with db() as conn, conn.cursor() as cur:
-                    cur.execute(
-                        "DELETE FROM events WHERE academy_id=%s AND team_id=%s AND event_type='training'",
-                        (ACADEMY_ID, team_id),
-                    )
-                    for event_date, event_time, _ in schedule:
-                        cur.execute(
-                            """INSERT INTO events(
-                                   academy_id,team_id,event_type,title,starts_at,
-                                   location,description,created_by)
-                               VALUES(%s,%s,'training',%s,%s,%s,%s,%s)""",
-                            (
-                                ACADEMY_ID,
-                                team_id,
-                                title.strip(),
-                                datetime.combine(event_date, event_time),
-                                location.strip() or None,
-                                description.strip() or None,
-                                user_id,
-                            ),
-                        )
-                notify_team_parents(
-                    team_id,
-                    "training_schedule",
-                    "Публикуван е нов тренировъчен график",
-                    f"Създадени са {len(schedule)} тренировки за периода {start_date:%d.%m.%Y} - {end_date:%d.%m.%Y}.",
-                )
-                set_flash(f"✅ Графикът е публикуван. Създадени са {len(schedule)} тренировки.")
-                st.rerun()
+                with db() as conn,conn.cursor() as cur:
+                    if all_children:cur.execute("DELETE FROM events WHERE academy_id=%s AND team_id=%s AND event_type='training'",(ACADEMY_ID,team_id))
+                    else:cur.execute("""DELETE FROM events e WHERE e.academy_id=%s AND e.team_id=%s AND e.event_type='training' AND e.starts_at::date BETWEEN %s AND %s AND EXISTS(SELECT 1 FROM event_players ep WHERE ep.event_id=e.id AND ep.player_id=ANY(%s))""",(ACADEMY_ID,team_id,start_date,end_date,selected_player_ids))
+                    for event_date,event_time,_ in schedule:
+                        cur.execute("""INSERT INTO events(academy_id,team_id,event_type,title,starts_at,location,description,created_by,target_all_players) VALUES(%s,%s,'training',%s,%s,%s,%s,%s,%s) RETURNING id""",(ACADEMY_ID,team_id,title.strip(),datetime.combine(event_date,event_time),location.strip() or None,description.strip() or None,user_id,all_children));event_id=cur.fetchone()[0]
+                        if not all_children:
+                            for pid in selected_player_ids:cur.execute("INSERT INTO event_players(academy_id,event_id,player_id) VALUES(%s,%s,%s)",(ACADEMY_ID,event_id,pid))
+                notice=f"{len(schedule)} тренировки за {start_date:%d.%m.%Y} - {end_date:%d.%m.%Y}."
+                notified=notify_team_parents(team_id,"training_schedule","Нов тренировъчен график",notice) if all_children else notify_selected_players_parents(selected_player_ids,"training_schedule","Индивидуален тренировъчен график",notice)
+                set_flash(f"✅ Графикът е публикуван. Уведомени родители: {notified}.");st.rerun()
 
     else:
         st.info("⚽ Създаване на единичен мач")
