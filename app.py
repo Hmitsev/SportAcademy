@@ -226,12 +226,37 @@ def avatar_html(image_bytes=None, mime_type=None, size=74):
     return f"""<div style="width:{size}px;height:{size}px;border-radius:50%;border:2px solid rgba(214,183,101,.65);background:linear-gradient(145deg,#11151c,#242a35);color:#9aa3b2;display:flex;align-items:center;justify-content:center;font-size:{int(size*.52)}px;flex:0 0 {size}px">👤</div>"""
 
 def valid_profile_image(uploaded_file):
-    if not uploaded_file: return None, None
-    image_bytes = uploaded_file.getvalue()
-    if len(image_bytes) > 5 * 1024 * 1024:
-        st.error("Снимката е прекалено голяма. Максималният размер е 5 MB.")
+    """Normalize profile photos before PostgreSQL storage to reduce transfer usage."""
+    if not uploaded_file:
         return None, None
-    return image_bytes, uploaded_file.type
+    raw_bytes = uploaded_file.getvalue()
+    if len(raw_bytes) > 8 * 1024 * 1024:
+        st.error("Снимката е прекалено голяма. Максималният входен размер е 8 MB.")
+        return None, None
+    try:
+        image = Image.open(io.BytesIO(raw_bytes))
+        image.load()
+        if image.mode not in ("RGB", "L"):
+            background = Image.new("RGB", image.size, (255, 255, 255))
+            if "A" in image.getbands():
+                background.paste(image, mask=image.getchannel("A"))
+            else:
+                background.paste(image.convert("RGB"))
+            image = background
+        else:
+            image = image.convert("RGB")
+        image.thumbnail((600, 600), Image.Resampling.LANCZOS)
+        output = io.BytesIO()
+        image.save(output, format="JPEG", quality=75, optimize=True, progressive=True)
+        compressed = output.getvalue()
+        if len(compressed) > 450 * 1024:
+            output = io.BytesIO()
+            image.save(output, format="JPEG", quality=62, optimize=True, progressive=True)
+            compressed = output.getvalue()
+        return compressed, "image/jpeg"
+    except Exception:
+        st.error("Файлът не може да бъде обработен като валидна снимка.")
+        return None, None
 
 
 def set_flash(message,kind="success"):
@@ -452,6 +477,8 @@ def init_db():
         """ALTER TABLE specialist_profiles ADD CONSTRAINT specialist_profiles_specialist_type_check CHECK(specialist_type IN ('conditioning','goalkeeper','medical','psychologist','other'))""",
         """ALTER TABLE specialist_profiles ADD COLUMN IF NOT EXISTS profile_image BYTEA""",
         """ALTER TABLE specialist_profiles ADD COLUMN IF NOT EXISTS profile_image_mime TEXT""",
+        """ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_image BYTEA""",
+        """ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_image_mime TEXT""",
         """ALTER TABLE academies ALTER COLUMN default_fee SET DEFAULT 35.00""",
         """ALTER TABLE fee_templates ALTER COLUMN amount SET DEFAULT 35.00""",
         """UPDATE academies SET default_fee=35.00 WHERE default_fee=50.00""",
@@ -2812,16 +2839,21 @@ def admin_specialist_manager(admin_user):
                     execute("INSERT INTO specialist_messages(academy_id,specialist_user_id,sender_user_id,subject,body) VALUES(%s,%s,%s,%s,%s)",(ACADEMY_ID,sp["user_id"],admin_user["id"],subject.strip(),body.strip()));create_notification(sp["user_id"],"specialist_message",subject.strip(),body.strip());set_flash("✅ Съобщението е изпратено.");st.rerun()
 
 def admin_dyulgerov_panel(user):
-    owner_coach=fetchone("""SELECT c.* FROM coaches c WHERE c.academy_id=%s AND c.user_id=%s ORDER BY c.active DESC,c.id LIMIT 1""",(ACADEMY_ID,user["id"]))
+    owner_profile=fetchone("SELECT profile_image,profile_image_mime FROM users WHERE academy_id=%s AND id=%s",(ACADEMY_ID,user["id"])) or {}
     title_col,photo_col=st.columns([5,1])
     with title_col:
         st.subheader("🦁 Дюлгеров")
         st.caption("Собственически и спортно-технически достъп през Admin профила, без отделен Coach или Specialist вход.")
+        with st.expander("📷 Профилна снимка",expanded=not bool(owner_profile.get("profile_image"))):
+            owner_image=st.file_uploader("Качи снимка",type=["jpg","jpeg","png","webp"],key="dyulgerov_direct_photo_upload")
+            if st.button("💾 Запази снимката",key="dyulgerov_direct_photo_save",use_container_width=True):
+                image_bytes,image_mime=valid_profile_image(owner_image)
+                if image_bytes:
+                    execute("UPDATE users SET profile_image=%s,profile_image_mime=%s WHERE academy_id=%s AND id=%s",(image_bytes,image_mime,ACADEMY_ID,user["id"]))
+                    set_flash("✅ Снимката на Дюлгеров е запазена.")
+                    st.rerun()
     with photo_col:
-        if owner_coach and owner_coach.get("profile_image"):
-            st.markdown(avatar_html(owner_coach.get("profile_image"),owner_coach.get("profile_image_mime"),92),unsafe_allow_html=True)
-        else:
-            st.markdown(avatar_html(None,None,92),unsafe_allow_html=True)
+        st.markdown(avatar_html(owner_profile.get("profile_image"),owner_profile.get("profile_image_mime"),92),unsafe_allow_html=True)
     teams=fetchall("SELECT * FROM teams WHERE academy_id=%s AND active ORDER BY birth_year,name",(ACADEMY_ID,))
     if not teams: st.info("Няма активни набори."); return
     tmap={t["name"]:t for t in teams}; team=tmap[st.selectbox("Набор",list(tmap),key="dyulgerov_team")]
@@ -2862,11 +2894,19 @@ def admin_panel(user):
     if count > 0:
         with st.expander(f"🔔 {count} нови известия", expanded=False):
             notification_center(user)
-    sections = ["Табло", "Регистрации", "Деца и групи", "Треньори и набори", "Роли и права",
-                "Дюлгеров", "Управление тренировки", "Кондиционен екип", "Финанси", "Информация"]
+    sections = ["ТАБЛО", "РЕГИСТРАЦИЯ", "ДЕЦА И ГРУПИ", "ДЮЛГЕРОВ", "НАСТРОЙКИ ЗА ПРОФИЛИТЕ", "ФИНАНСИ", "ИНФОРМАЦИЯ"]
     sec = st.sidebar.radio("Админ меню", sections)
+    profile_settings_page = None
+    if sec == "НАСТРОЙКИ ЗА ПРОФИЛИТЕ":
+        st.subheader("⚙️ Настройки за профилите")
+        profile_settings_page = st.radio(
+            "Избери настройка",
+            ["Треньори и набори", "Роли и права", "Управление тренировки", "Кондиционен екип"],
+            horizontal=True,
+            key="admin_profile_settings_page",
+        )
 
-    if sec == "Табло":
+    if sec == "ТАБЛО":
         vals = [
             fetchone("SELECT COUNT(*) c FROM users WHERE academy_id=%s AND account_status='pending'", (ACADEMY_ID,))["c"],
             fetchone("SELECT COUNT(*) c FROM players WHERE academy_id=%s AND approval_status='pending'", (ACADEMY_ID,))["c"],
@@ -2888,7 +2928,7 @@ def admin_panel(user):
             else:
                 st.info("Няма активни набори.")
 
-    elif sec == "Регистрации":
+    elif sec == "РЕГИСТРАЦИЯ":
         pending, archive = st.tabs(["🔴 Очакващи", "🟢 Архив потвърдени"])
         with pending:
             rows = fetchall("SELECT * FROM users WHERE academy_id=%s AND role='parent' AND account_status='pending' ORDER BY created_at", (ACADEMY_ID,))
@@ -2940,7 +2980,7 @@ def admin_panel(user):
                             set_flash(f"✅ Временната парола за {r['email']} е зададена. Всички стари сесии са прекратени.")
                             st.rerun()
 
-    elif sec == "Деца и групи":
+    elif sec == "ДЕЦА И ГРУПИ":
         teams = fetchall("""SELECT t.*,COALESCE(STRING_AGG(c.display_name, ', ' ORDER BY c.display_name),'Без треньор') display_name
             FROM teams t LEFT JOIN coach_teams ct ON ct.team_id=t.id AND ct.academy_id=t.academy_id
             LEFT JOIN coaches c ON c.id=ct.coach_id AND c.active
@@ -3012,7 +3052,7 @@ def admin_panel(user):
                             st.success(f"{player['first_name']} {player['last_name']} е изтрит/а окончателно.")
                             st.rerun()
 
-    elif sec == "Треньори и набори":
+    elif sec == "НАСТРОЙКИ ЗА ПРОФИЛИТЕ" and profile_settings_page == "Треньори и набори":
         coach_account_manager();st.divider()
         coaches=fetchall("SELECT * FROM coaches WHERE academy_id=%s AND active ORDER BY id",(ACADEMY_ID,)); teams=fetchall("SELECT * FROM teams WHERE academy_id=%s AND active ORDER BY birth_year",(ACADEMY_ID,))
         cmap={c["display_name"]:c["id"] for c in coaches};st.subheader("⚽ Управление на набор")
@@ -3027,7 +3067,7 @@ def admin_panel(user):
                     for coach_id in selected_ids:cur.execute("INSERT INTO coach_teams(academy_id,coach_id,team_id) VALUES(%s,%s,%s)",(ACADEMY_ID,coach_id,team["id"]))
                     cur.execute("UPDATE teams SET coach_id=%s WHERE id=%s AND academy_id=%s",(selected_ids[0] if selected_ids else None,team["id"],ACADEMY_ID))
                 set_flash(f"✅ Треньорите за {team['name']} са обновени.");st.rerun()
-    elif sec == "Роли и права":
+    elif sec == "НАСТРОЙКИ ЗА ПРОФИЛИТЕ" and profile_settings_page == "Роли и права":
         st.caption("Тук се управляват Parent, Coach и Admin. Specialist профилите се създават и настройват само от „Кондиционен екип“.")
         users = fetchall("SELECT * FROM users WHERE academy_id=%s ORDER BY role,first_name,last_name", (ACADEMY_ID,))
         user_labels={f"{a['first_name']} {a['last_name']} · {a['email']} · {a['role']}":a for a in users}
@@ -3153,13 +3193,13 @@ def admin_panel(user):
                         st.success(f"Профилът {account['email']} е изтрит окончателно.")
                         st.rerun()
 
-    elif sec == "Дюлгеров":
+    elif sec == "ДЮЛГЕРОВ":
         admin_dyulgerov_panel(user)
-    elif sec == "Управление тренировки":
+    elif sec == "НАСТРОЙКИ ЗА ПРОФИЛИТЕ" and profile_settings_page == "Управление тренировки":
         admin_training_resources(user)
-    elif sec == "Кондиционен екип":
+    elif sec == "НАСТРОЙКИ ЗА ПРОФИЛИТЕ" and profile_settings_page == "Кондиционен екип":
         admin_specialist_manager(user)
-    elif sec == "Финанси":
+    elif sec == "ФИНАНСИ":
         st.session_state.setdefault("admin_fee_page", "Начисляване")
         b1,b2,b3,b4=st.columns(4)
         if b1.button("💰 Начисляване",use_container_width=True,type="primary" if st.session_state.admin_fee_page=="Начисляване" else "secondary"):
@@ -3196,7 +3236,7 @@ def admin_panel(user):
         elif fee_page == "Разход":
             expense_panel(user)
 
-    elif sec == "Информация":
+    elif sec == "ИНФОРМАЦИЯ":
         st.subheader("📨 Съобщение до треньор")
         coach_users=fetchall("SELECT c.display_name,u.id user_id FROM coaches c JOIN users u ON u.id=c.user_id WHERE c.academy_id=%s AND c.active AND u.active ORDER BY c.display_name",(ACADEMY_ID,))
         if coach_users:
