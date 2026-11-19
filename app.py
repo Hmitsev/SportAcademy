@@ -3,10 +3,6 @@ import io
 import base64
 import hashlib
 import secrets
-import smtplib
-import ssl
-import time
-from email.message import EmailMessage
 import pandas as pd
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
@@ -154,57 +150,53 @@ def db():
                     pass
 
 
-def reset_db_pool():
-    """Discard cached PostgreSQL connections after SSL/network failures."""
-    try:
-        pool.clear()
-    except Exception:
-        try:
-            st.cache_resource.clear()
-        except Exception:
-            pass
-
-
-def _retry_db_call(operation, attempts=3):
-    last_error = None
-    for attempt in range(attempts):
-        try:
-            return operation()
-        except (psycopg2.OperationalError, psycopg2.InterfaceError) as exc:
-            last_error = exc
-            reset_db_pool()
-            if attempt < attempts - 1:
-                time.sleep(0.35 * (attempt + 1))
-    raise last_error
-
-
 def fetchone(q, p=()):
-    def operation():
-        with db() as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute(q, p)
-                return cur.fetchone()
-    return _retry_db_call(operation)
+    for attempt in range(2):
+        try:
+            with db() as conn:
+                with conn.cursor(
+                    cursor_factory=RealDictCursor
+                ) as cur:
+                    cur.execute(q, p)
+                    return cur.fetchone()
+
+        except (
+            psycopg2.OperationalError,
+            psycopg2.InterfaceError,
+        ):
+            if attempt == 1:
+                raise
 
 
 def fetchall(q, p=()):
-    def operation():
-        with db() as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute(q, p)
-                return cur.fetchall()
-    return _retry_db_call(operation)
+    for attempt in range(2):
+        try:
+            with db() as conn:
+                with conn.cursor(
+                    cursor_factory=RealDictCursor
+                ) as cur:
+                    cur.execute(q, p)
+                    return cur.fetchall()
+
+        except (
+            psycopg2.OperationalError,
+            psycopg2.InterfaceError,
+        ):
+            if attempt == 1:
+                raise
 
 
 def execute(q, p=(), returning=False):
-    def operation():
-        with db() as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute(q, p)
-                if returning:
-                    return cur.fetchone()
-                return None
-    return _retry_db_call(operation)
+    with db() as conn:
+        with conn.cursor(
+            cursor_factory=RealDictCursor
+        ) as cur:
+            cur.execute(q, p)
+
+            if returning:
+                return cur.fetchone()
+
+            return None
 
 def hash_password(value):
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
@@ -370,16 +362,6 @@ def init_db():
             last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""",
         """CREATE INDEX IF NOT EXISTS idx_login_sessions_token ON login_sessions(token_hash,last_seen)""",
-        """CREATE TABLE IF NOT EXISTS password_reset_codes(
-            id BIGSERIAL PRIMARY KEY,
-            academy_id BIGINT NOT NULL REFERENCES academies(id) ON DELETE CASCADE,
-            user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            code_hash TEXT NOT NULL,
-            expires_at TIMESTAMPTZ NOT NULL,
-            attempts INTEGER NOT NULL DEFAULT 0,
-            used_at TIMESTAMPTZ,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""",
-        """CREATE INDEX IF NOT EXISTS idx_password_reset_user ON password_reset_codes(academy_id,user_id,created_at DESC)""",
         """CREATE TABLE IF NOT EXISTS coach_teams(
             academy_id BIGINT NOT NULL REFERENCES academies(id) ON DELETE CASCADE,
             coach_id BIGINT NOT NULL REFERENCES coaches(id) ON DELETE CASCADE,
@@ -580,7 +562,7 @@ except (psycopg2.OperationalError, psycopg2.InterfaceError):
         use_container_width=True,
         type="primary",
     ):
-        reset_db_pool()
+        st.cache_resource.clear()
         st.rerun()
 
     st.stop()
@@ -640,7 +622,7 @@ except (psycopg2.OperationalError, psycopg2.InterfaceError):
         use_container_width=True,
         type="primary",
     ):
-        reset_db_pool()
+        st.cache_resource.clear()
         st.rerun()
 
     st.stop()
@@ -774,7 +756,7 @@ except (psycopg2.OperationalError, psycopg2.InterfaceError):
         use_container_width=True,
         type="primary",
     ):
-        reset_db_pool()
+        st.cache_resource.clear()
         st.rerun()
 
     st.stop()
@@ -1750,85 +1732,6 @@ def register_parent():
             st.success("Регистрацията е изпратена. Администраторът трябва да одобри профила и да свърже децата с група.")
         except Exception as exc: st.error("Имейлът вече е използван или данните са невалидни.")
 
-def send_password_reset_email(recipient,code):
-    smtp_host=st.secrets.get("SMTP_HOST",os.getenv("SMTP_HOST",""))
-    smtp_port=int(st.secrets.get("SMTP_PORT",os.getenv("SMTP_PORT","587")))
-    smtp_user=st.secrets.get("SMTP_USER",os.getenv("SMTP_USER",""))
-    smtp_password=st.secrets.get("SMTP_PASSWORD",os.getenv("SMTP_PASSWORD",""))
-    smtp_from=st.secrets.get("SMTP_FROM",os.getenv("SMTP_FROM",smtp_user))
-    smtp_name=st.secrets.get("SMTP_FROM_NAME",os.getenv("SMTP_FROM_NAME","Dyulgerov Academy"))
-    if not smtp_host or not smtp_user or not smtp_password or not smtp_from:
-        raise RuntimeError("Липсват SMTP настройки в Streamlit secrets / Render environment variables.")
-    msg=EmailMessage();msg["Subject"]="Код за възстановяване на парола";msg["From"]=f"{smtp_name} <{smtp_from}>";msg["To"]=recipient
-    msg.set_content(f"""Здравейте,
-
-Получихме заявка за възстановяване на паролата Ви в Dyulgerov Academy.
-
-Вашият еднократен код е: {code}
-
-Кодът е валиден 15 минути. Ако не сте направили заявката, игнорирайте този имейл.
-
-Dyulgerov Academy""")
-    context=ssl.create_default_context()
-    if smtp_port==465:
-        with smtplib.SMTP_SSL(smtp_host,smtp_port,context=context,timeout=20) as server:
-            server.login(smtp_user,smtp_password);server.send_message(msg)
-    else:
-        with smtplib.SMTP(smtp_host,smtp_port,timeout=20) as server:
-            server.ehlo();server.starttls(context=context);server.ehlo();server.login(smtp_user,smtp_password);server.send_message(msg)
-
-def password_reset_view():
-    st.subheader("🔑 Възстановяване на парола")
-    stage=st.session_state.get("password_reset_stage","request")
-    if stage=="request":
-        with st.form("password_reset_request"):
-            email=st.text_input("Регистрационен имейл").strip().lower()
-            request_code=st.form_submit_button("Изпрати код",use_container_width=True,type="primary")
-        if request_code:
-            user=fetchone("SELECT id,email,active FROM users WHERE academy_id=%s AND lower(email)=lower(%s)",(ACADEMY_ID,email))
-            if user and user.get("active"):
-                recent=fetchone("SELECT created_at FROM password_reset_codes WHERE academy_id=%s AND user_id=%s ORDER BY created_at DESC LIMIT 1",(ACADEMY_ID,user["id"]))
-                if recent and (datetime.now(recent["created_at"].tzinfo)-recent["created_at"]).total_seconds()<60:
-                    st.warning("Изчакайте 60 секунди преди да поискате нов код.");return
-                code=f"{secrets.randbelow(1000000):06d}"
-                execute("UPDATE password_reset_codes SET used_at=NOW() WHERE academy_id=%s AND user_id=%s AND used_at IS NULL",(ACADEMY_ID,user["id"]))
-                reset_id=execute("""INSERT INTO password_reset_codes(academy_id,user_id,code_hash,expires_at)
-                    VALUES(%s,%s,%s,NOW()+INTERVAL '15 minutes') RETURNING id""",(ACADEMY_ID,user["id"],hash_password(code)),True)["id"]
-                try:
-                    send_password_reset_email(user["email"],code)
-                    st.session_state.password_reset_stage="verify";st.session_state.password_reset_id=reset_id;st.session_state.password_reset_email=user["email"]
-                    st.success("Кодът е изпратен. Проверете и папка Spam/Junk.");st.rerun()
-                except Exception as exc:
-                    execute("UPDATE password_reset_codes SET used_at=NOW() WHERE id=%s",(reset_id,));st.error(f"Имейлът не беше изпратен: {exc}")
-            else:
-                st.success("Ако имейлът е регистриран, ще получите код за възстановяване.")
-    else:
-        st.caption(f"Кодът е изпратен на {st.session_state.get('password_reset_email','регистрационния имейл')} и е валиден 15 минути.")
-        with st.form("password_reset_verify"):
-            code=st.text_input("6-цифрен код",max_chars=6)
-            new_password=st.text_input("Нова парола",type="password")
-            repeat_password=st.text_input("Повтори новата парола",type="password")
-            change=st.form_submit_button("Смени паролата",use_container_width=True,type="primary")
-        if change:
-            reset=fetchone("""SELECT prc.*,u.email FROM password_reset_codes prc JOIN users u ON u.id=prc.user_id
-                WHERE prc.id=%s AND prc.academy_id=%s""",(st.session_state.get("password_reset_id"),ACADEMY_ID))
-            if not reset or reset.get("used_at") or reset["expires_at"]<datetime.now(reset["expires_at"].tzinfo):st.error("Кодът е изтекъл. Поискайте нов код.")
-            elif reset["attempts"]>=5:st.error("Кодът е блокиран след 5 неуспешни опита. Поискайте нов.")
-            elif reset["code_hash"]!=hash_password(code.strip()):
-                execute("UPDATE password_reset_codes SET attempts=attempts+1 WHERE id=%s",(reset["id"],));st.error("Невалиден код.")
-            elif len(new_password)<8:st.error("Новата парола трябва да е минимум 8 символа.")
-            elif new_password!=repeat_password:st.error("Двете пароли не съвпадат.")
-            else:
-                with db() as conn,conn.cursor() as cur:
-                    cur.execute("UPDATE users SET password_hash=%s WHERE academy_id=%s AND id=%s",(hash_password(new_password),ACADEMY_ID,reset["user_id"]))
-                    cur.execute("UPDATE password_reset_codes SET used_at=NOW() WHERE id=%s",(reset["id"],))
-                    cur.execute("DELETE FROM login_sessions WHERE academy_id=%s AND user_id=%s",(ACADEMY_ID,reset["user_id"]))
-                for key in ["password_reset_stage","password_reset_id","password_reset_email"]:st.session_state.pop(key,None)
-                st.success("Паролата е сменена успешно. Вече можете да влезете с новата парола.")
-        if st.button("← Поискай нов код",use_container_width=True):
-            for key in ["password_reset_stage","password_reset_id","password_reset_email"]:st.session_state.pop(key,None)
-            st.rerun()
-
 def login():
     with st.form("login_form"):
         email=st.text_input("Имейл").strip().lower(); pw=st.text_input("Парола",type="password")
@@ -2410,7 +2313,44 @@ def parent_panel(user):
                     create_notification(coach_user["user_id"], "feedback", "Нова обратна връзка от родител", subject.strip())
                     set_flash("✅ Обратната връзка е изпратена само към треньора."); st.rerun()
     else:
-        st.subheader("Профил и деца")
+        st.subheader("👤 Настройки")
+        st.markdown("### 🔑 Смяна на паролата")
+        st.caption("Ако Admin Ви е дал временна парола, влезте с нея и задайте тук нова лична парола.")
+        with st.form("parent_change_password", clear_on_submit=True):
+            current_password = st.text_input("Текуща / временна парола", type="password")
+            new_password = st.text_input("Нова парола", type="password", help="Минимум 8 символа")
+            repeat_new_password = st.text_input("Повтори новата парола", type="password")
+            change_password = st.form_submit_button("🔑 Смени паролата", use_container_width=True, type="primary")
+        if change_password:
+            fresh_user = fetchone(
+                "SELECT id,password_hash FROM users WHERE id=%s AND academy_id=%s AND role='parent' AND active",
+                (user["id"], ACADEMY_ID),
+            )
+            if not fresh_user or fresh_user["password_hash"] != hash_password(current_password):
+                st.error("Текущата / временната парола е неправилна.")
+            elif len(new_password) < 8:
+                st.error("Новата парола трябва да е минимум 8 символа.")
+            elif new_password != repeat_new_password:
+                st.error("Двете нови пароли не съвпадат.")
+            elif current_password == new_password:
+                st.error("Новата парола трябва да е различна от текущата.")
+            else:
+                current_token = st.session_state.get("login_token") or st.query_params.get("session")
+                with db() as conn, conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE users SET password_hash=%s WHERE id=%s AND academy_id=%s AND role='parent'",
+                        (hash_password(new_password), user["id"], ACADEMY_ID),
+                    )
+                    cur.execute(
+                        "DELETE FROM login_sessions WHERE academy_id=%s AND user_id=%s",
+                        (ACADEMY_ID, user["id"]),
+                    )
+                st.session_state.clear()
+                st.query_params.clear()
+                st.success("Паролата е сменена успешно. Влезте отново с новата парола.")
+                st.rerun()
+        st.divider()
+        st.subheader("Добавяне на дете")
         with st.form("add_child_later"):
             a,b,c=st.columns(3); cf=a.text_input("Име на ново дете"); cl=b.text_input("Фамилия"); bd=c.date_input("Дата на раждане",date(2018,1,1))
             add=st.form_submit_button("Добави дете",use_container_width=True)
@@ -2946,7 +2886,42 @@ def admin_panel(user):
         with archive:
             rows = fetchall("SELECT * FROM users WHERE academy_id=%s AND role='parent' AND account_status='approved' ORDER BY created_at DESC", (ACADEMY_ID,))
             if not rows: st.info("Архивът е празен.")
-            for r in rows: st.write(f"🟢 **{r['first_name']} {r['last_name']}** · {r['email']}")
+            for r in rows:
+                with st.expander(f"🟢 {r['first_name']} {r['last_name']} · {r['email']}"):
+                    st.caption("Ако родителят е забравил паролата, Admin може да зададе временна парола. След това родителят я сменя от Настройки.")
+                    temporary_password = st.text_input(
+                        "Временна парола",
+                        type="password",
+                        key=f"admin_temp_password_{r['id']}",
+                        placeholder="Минимум 8 символа",
+                    )
+                    repeat_temporary_password = st.text_input(
+                        "Повтори временната парола",
+                        type="password",
+                        key=f"admin_temp_password_repeat_{r['id']}",
+                    )
+                    if st.button(
+                        "🔑 Задай временна парола",
+                        key=f"admin_set_temp_password_{r['id']}",
+                        use_container_width=True,
+                        type="primary",
+                    ):
+                        if len(temporary_password) < 8:
+                            st.error("Временната парола трябва да е минимум 8 символа.")
+                        elif temporary_password != repeat_temporary_password:
+                            st.error("Двете пароли не съвпадат.")
+                        else:
+                            with db() as conn, conn.cursor() as cur:
+                                cur.execute(
+                                    "UPDATE users SET password_hash=%s WHERE id=%s AND academy_id=%s AND role='parent'",
+                                    (hash_password(temporary_password), r["id"], ACADEMY_ID),
+                                )
+                                cur.execute(
+                                    "DELETE FROM login_sessions WHERE academy_id=%s AND user_id=%s",
+                                    (ACADEMY_ID, r["id"]),
+                                )
+                            set_flash(f"✅ Временната парола за {r['email']} е зададена. Всички стари сесии са прекратени.")
+                            st.rerun()
 
     elif sec == "Деца и групи":
         teams = fetchall("""SELECT t.*,COALESCE(STRING_AGG(c.display_name, ', ' ORDER BY c.display_name),'Без треньор') display_name
@@ -3444,10 +3419,9 @@ def render_app():
     if not user:
         public_home()
 
-        tab1, tab2, tab3 = st.tabs([
+        tab1, tab2 = st.tabs([
             "Вход",
-            "Регистрация на родител",
-            "Забравена парола"
+            "Регистрация на родител"
         ])
 
         with tab1:
@@ -3455,9 +3429,6 @@ def render_app():
 
         with tab2:
             register_parent()
-
-        with tab3:
-            password_reset_view()
 
         # ==================================================
         # КОДЕКС НА ЛЪВОВЕТЕ
@@ -3497,5 +3468,5 @@ except (psycopg2.OperationalError, psycopg2.InterfaceError):
     st.markdown("## 🔄 Връзката беше прекъсната")
     st.info("Приложението е било неактивно известно време. Моля, рефрешнете страницата, за да продължите.")
     if st.button("🔄 Опитай отново", use_container_width=True, type="primary"):
-        reset_db_pool()
+        st.cache_resource.clear()
         st.rerun()
