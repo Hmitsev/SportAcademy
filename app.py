@@ -237,7 +237,7 @@ def init_db():
             id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL, slug TEXT NOT NULL UNIQUE,
             sport TEXT NOT NULL DEFAULT 'football', city TEXT, logo_file TEXT,
             primary_color TEXT NOT NULL DEFAULT '#b48a32', secondary_color TEXT NOT NULL DEFAULT '#f7f2e8',
-            default_fee NUMERIC(12,2) NOT NULL DEFAULT 50.00, currency VARCHAR(3) NOT NULL DEFAULT 'EUR',
+            default_fee NUMERIC(12,2) NOT NULL DEFAULT 35.00, currency VARCHAR(3) NOT NULL DEFAULT 'EUR',
             active BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""",
         """CREATE TABLE IF NOT EXISTS users(
             id BIGSERIAL PRIMARY KEY, academy_id BIGINT NOT NULL REFERENCES academies(id) ON DELETE CASCADE,
@@ -277,7 +277,7 @@ def init_db():
         """CREATE TABLE IF NOT EXISTS fee_templates(
             id BIGSERIAL PRIMARY KEY, academy_id BIGINT NOT NULL REFERENCES academies(id) ON DELETE CASCADE,
             team_id BIGINT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
-            amount NUMERIC(12,2) NOT NULL DEFAULT 50.00, currency VARCHAR(3) NOT NULL DEFAULT 'EUR',
+            amount NUMERIC(12,2) NOT NULL DEFAULT 35.00, currency VARCHAR(3) NOT NULL DEFAULT 'EUR',
             active BOOLEAN NOT NULL DEFAULT TRUE, UNIQUE(academy_id,team_id))""",
         """CREATE TABLE IF NOT EXISTS player_fees(
             id BIGSERIAL PRIMARY KEY, academy_id BIGINT NOT NULL REFERENCES academies(id) ON DELETE CASCADE,
@@ -377,7 +377,7 @@ def init_db():
             academy_id BIGINT NOT NULL REFERENCES academies(id) ON DELETE CASCADE,
             user_id BIGINT NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
             display_name TEXT NOT NULL,
-            specialist_type TEXT NOT NULL DEFAULT 'conditioning' CHECK(specialist_type IN ('conditioning','medical','psychologist','other')),
+            specialist_type TEXT NOT NULL DEFAULT 'conditioning' CHECK(specialist_type IN ('conditioning','goalkeeper','medical','psychologist','other')),
             qualification TEXT,
             active BOOLEAN NOT NULL DEFAULT TRUE,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""",
@@ -436,8 +436,14 @@ def init_db():
         """ALTER TABLE players ADD COLUMN IF NOT EXISTS profile_image_mime TEXT""",
         """ALTER TABLE coaches ADD COLUMN IF NOT EXISTS profile_image BYTEA""",
         """ALTER TABLE coaches ADD COLUMN IF NOT EXISTS profile_image_mime TEXT""",
+        """ALTER TABLE specialist_profiles DROP CONSTRAINT IF EXISTS specialist_profiles_specialist_type_check""",
+        """ALTER TABLE specialist_profiles ADD CONSTRAINT specialist_profiles_specialist_type_check CHECK(specialist_type IN ('conditioning','goalkeeper','medical','psychologist','other'))""",
         """ALTER TABLE specialist_profiles ADD COLUMN IF NOT EXISTS profile_image BYTEA""",
         """ALTER TABLE specialist_profiles ADD COLUMN IF NOT EXISTS profile_image_mime TEXT""",
+        """ALTER TABLE academies ALTER COLUMN default_fee SET DEFAULT 35.00""",
+        """ALTER TABLE fee_templates ALTER COLUMN amount SET DEFAULT 35.00""",
+        """UPDATE academies SET default_fee=35.00 WHERE default_fee=50.00""",
+        """UPDATE fee_templates SET amount=35.00 WHERE amount=50.00""",
         """ALTER TABLE academies ADD COLUMN IF NOT EXISTS parent_help_video_url TEXT""",
         """ALTER TABLE players ADD COLUMN IF NOT EXISTS position TEXT""",
         """ALTER TABLE teams ADD COLUMN IF NOT EXISTS standings_url TEXT""",
@@ -525,7 +531,7 @@ def init_db():
     with db() as conn, conn.cursor() as cur:
         for sql in statements: cur.execute(sql)
         cur.execute("""INSERT INTO academies(name,slug,city,logo_file,default_fee)
-            VALUES('Dyulgerov Academy',%s,'Благоевград','лого.jpg',50.00)
+            VALUES('Dyulgerov Academy',%s,'Благоевград','лого.jpg',35.00)
             ON CONFLICT(slug) DO NOTHING""", (ACADEMY_SLUG,))
         cur.execute("SELECT id FROM academies WHERE slug=%s", (ACADEMY_SLUG,))
         academy_id = cur.fetchone()[0]
@@ -537,7 +543,7 @@ def init_db():
         for year in range(2012,2029):
             cur.execute("INSERT INTO teams(academy_id,name,birth_year) VALUES(%s,%s,%s) ON CONFLICT DO NOTHING", (academy_id,f"Набор {year}",year))
         cur.execute("""INSERT INTO fee_templates(academy_id,team_id,amount)
-            SELECT %s,id,50.00 FROM teams WHERE academy_id=%s ON CONFLICT DO NOTHING""", (academy_id,academy_id))
+            SELECT %s,id,35.00 FROM teams WHERE academy_id=%s ON CONFLICT DO NOTHING""", (academy_id,academy_id))
     return academy_id
 
 try:
@@ -1746,20 +1752,24 @@ def parent_nav():
                     st.session_state.parent_page=page; st.rerun()
 
 def parent_players(user):
-    return fetchall("""SELECT p.*,t.name team_name,
-        COALESCE(tc.coach_names,'Очаква свързване') coach_name,
-        tc.coach_image,tc.coach_image_mime
-        FROM parent_players pp JOIN players p ON p.id=pp.player_id
-        LEFT JOIN teams t ON t.id=p.team_id
-        LEFT JOIN LATERAL (
-            SELECT STRING_AGG(c.display_name, ', ' ORDER BY c.display_name) coach_names,
-                   (ARRAY_AGG(c.profile_image ORDER BY c.id) FILTER(WHERE c.profile_image IS NOT NULL))[1] coach_image,
-                   (ARRAY_AGG(c.profile_image_mime ORDER BY c.id) FILTER(WHERE c.profile_image IS NOT NULL))[1] coach_image_mime
-            FROM coach_teams ct JOIN coaches c ON c.id=ct.coach_id AND c.active
-            WHERE ct.academy_id=p.academy_id AND ct.team_id=p.team_id
-        ) tc ON TRUE
+    return fetchall("""SELECT p.*,t.name team_name,COALESCE(tc.coach_names,'Очаква свързване') coach_name,tc.coach_cards,
+        CASE WHEN p.position='Вратар' THEN gk.goalkeeper_cards ELSE NULL END goalkeeper_cards
+        FROM parent_players pp JOIN players p ON p.id=pp.player_id LEFT JOIN teams t ON t.id=p.team_id
+        LEFT JOIN LATERAL (SELECT STRING_AGG(c.display_name, ', ' ORDER BY c.display_name) coach_names,
+          JSONB_AGG(JSONB_BUILD_OBJECT('name',c.display_name,'image',ENCODE(c.profile_image,'base64'),'mime',COALESCE(c.profile_image_mime,'image/jpeg')) ORDER BY c.display_name) FILTER(WHERE c.id IS NOT NULL) coach_cards
+          FROM coach_teams ct JOIN coaches c ON c.id=ct.coach_id AND c.active WHERE ct.academy_id=p.academy_id AND ct.team_id=p.team_id) tc ON TRUE
+        LEFT JOIN LATERAL (SELECT JSONB_AGG(JSONB_BUILD_OBJECT('name',sp.display_name,'image',ENCODE(sp.profile_image,'base64'),'mime',COALESCE(sp.profile_image_mime,'image/jpeg')) ORDER BY sp.display_name) goalkeeper_cards
+          FROM specialist_teams st JOIN specialist_profiles sp ON sp.user_id=st.specialist_user_id AND sp.active AND sp.specialist_type='goalkeeper'
+          JOIN users su ON su.id=sp.user_id AND su.active WHERE st.academy_id=p.academy_id AND st.team_id=p.team_id) gk ON TRUE
         WHERE pp.academy_id=%s AND pp.parent_user_id=%s AND p.active ORDER BY p.first_name""",(ACADEMY_ID,user["id"]))
-
+def profile_cards_html(cards,title):
+    if not cards:return ''
+    blocks=[]
+    for card in cards:
+        image=card.get('image') or '';mime=card.get('mime') or 'image/jpeg';name=card.get('name') or 'Профил'
+        av=f'<img src="data:{mime};base64,{image}" style="width:64px;height:64px;border-radius:50%;object-fit:cover;border:2px solid #d6b765">' if image else '<div style="width:64px;height:64px;border-radius:50%;border:2px solid #d6b765;display:flex;align-items:center;justify-content:center">👤</div>'
+        blocks.append(f'<div style="text-align:center;min-width:85px">{av}<div style="font-size:.78rem;font-weight:800">{name}</div></div>')
+    return f'<div style="color:#c8c1b5;font-size:.78rem;margin:6px 0">{title}</div><div style="display:flex;flex-wrap:wrap;gap:12px">'+''.join(blocks)+'</div>'
 def evaluation_average(row):
     return sum(int(row[x]) for x in ("technique","tactics","physical","teamwork","discipline","effort"))/6
 
@@ -2106,48 +2116,16 @@ def parent_panel(user):
             "SELECT * FROM public_posts WHERE academy_id=%s AND published ORDER BY created_at DESC LIMIT 1",
             (ACADEMY_ID,),
         )
-        c1, c2 = st.columns([1.6, 1])
-
-        with c1:
-            st.markdown(
-                f"""
-                <div style="
-                    min-height:140px;
-                    padding:14px;
-                    border-radius:18px;
-                    background:rgba(8,8,8,.72);
-                    border:1px solid rgba(214,183,101,.48);
-                    display:flex;
-                    align-items:center;
-                    justify-content:center;
-                    gap:14px;
-                ">
-                    {avatar_html(
-                        child.get('coach_image'),
-                        child.get('coach_image_mime'),
-                        78
-                    )}
-                    <div>
-                        <div style="font-size:.8rem;color:#c8c1b5">
-                            Треньор
-                        </div>
-                        <div style="font-size:1.02rem;font-weight:800">
-                            {child.get('coach_name') or 'Очаква свързване'}
-                        </div>
-                        <div style="font-size:.82rem;color:#c8c1b5;margin-top:4px">
-                            {child.get('team_name') or 'Без набор'}
-                        </div>
-                    </div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-        
-        with c2:
-            st.metric(
-                "Такса",
-                f"{academy()['default_fee']:.2f} €"
-            )
+        st.markdown("### Треньорски екип")
+        st.markdown(f"""<div style="padding:16px;border-radius:18px;background:rgba(8,8,8,.72);border:1px solid rgba(214,183,101,.48)">
+        {profile_cards_html(child.get('coach_cards'),'Треньори на набора')}
+        {profile_cards_html(child.get('goalkeeper_cards'),'Треньор на вратарите') if child.get('position')=='Вратар' else ''}
+        </div>""",unsafe_allow_html=True)
+        fee_col,player_col=st.columns(2)
+        with fee_col: st.metric("Такса",f"{academy()['default_fee']:.2f} €")
+        with player_col:
+            st.markdown("**Снимка на детето**")
+            st.markdown(avatar_html(child.get('profile_image'),child.get('profile_image_mime'),82),unsafe_allow_html=True)
         if latest_info:
             with st.container(border=True):
                 st.subheader(latest_info["title"])
@@ -2591,6 +2569,7 @@ def coach_account_manager():
 
 SPECIALIST_TYPE_LABELS={
     "conditioning":"Кондиционен треньор",
+    "goalkeeper":"Треньор на вратарите",
     "medical":"Медицинско лице",
     "psychologist":"Психолог",
     "other":"Друг специалист",
@@ -3081,7 +3060,7 @@ def admin_panel(user):
         fee_page=st.session_state.admin_fee_page
         if fee_page == "Начисляване":
             teams = fetchall("SELECT * FROM teams WHERE academy_id=%s AND active ORDER BY birth_year", (ACADEMY_ID,)); tmap = {t["name"]: t for t in teams}; team_name = st.selectbox("Набор", list(tmap)); team = tmap[team_name]
-            default = fetchone("SELECT amount FROM fee_templates WHERE academy_id=%s AND team_id=%s", (ACADEMY_ID,team["id"])); amount = st.number_input("Стандартна сума €",0.0,1000.0,float(default["amount"] if default else 50),.01); month = st.selectbox("Месец",range(1,13),index=date.today().month-1); year = st.number_input("Година",2024,2045,date.today().year)
+            default = fetchone("SELECT amount FROM fee_templates WHERE academy_id=%s AND team_id=%s", (ACADEMY_ID,team["id"])); amount = st.number_input("Стандартна сума €",0.0,1000.0,float(default["amount"] if default else 35),.01); month = st.selectbox("Месец",range(1,13),index=date.today().month-1); year = st.number_input("Година",2024,2045,date.today().year)
             players = fetchall("SELECT * FROM players WHERE academy_id=%s AND team_id=%s AND approval_status='approved' ORDER BY first_name", (ACADEMY_ID,team["id"])); selected = {}
             for player in players:
                 c1,c2,c3=st.columns([1,4,2]); use=c1.checkbox("",True,key=f"fu{player['id']}"); c2.write(f"{player['first_name']} {player['last_name']}"); custom=c3.number_input("Индивидуална",0.0,1000.0,float(amount),.01,key=f"fa{player['id']}"); selected[player["id"]]=(use,custom)
@@ -3168,6 +3147,7 @@ def coach_panel(user):
     if not teams:
         st.info("Няма възложени набори към този треньор.")
         return
+    st.sidebar.markdown(avatar_html(coach.get("profile_image"),coach.get("profile_image_mime"),72),unsafe_allow_html=True)
     st.sidebar.caption(coach["display_name"])
     sections = ["Табло", "Тренировки и мачове", "Упражнения", "Група за мача", "Присъствие", "Такси", "Съобщения", "Обратна връзка"]
     sec = st.sidebar.radio("Треньорско меню", sections)
