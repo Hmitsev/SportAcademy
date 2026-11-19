@@ -2128,7 +2128,6 @@ def parent_panel(user):
         fee_col,player_col=st.columns(2)
         with fee_col: st.metric("Такса",f"{academy()['default_fee']:.2f} €")
         with player_col:
-            st.markdown("**Снимка на детето**")
             st.markdown(avatar_html(child.get('profile_image'),child.get('profile_image_mime'),82),unsafe_allow_html=True)
         if latest_info:
             with st.container(border=True):
