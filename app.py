@@ -1854,7 +1854,7 @@ def parent_lions_banner():
     .lions-parent-banner{position:relative;width:100%;min-height:255px;overflow:hidden;box-sizing:border-box;display:grid;grid-template-columns:43% 57%;align-items:center;padding:8px 5%;margin:2px 0 18px;background:radial-gradient(circle at 25% 50%,rgba(202,151,35,.08),transparent 33%),linear-gradient(135deg,#fffdf8 0%,#fff 58%,#fffaf0 100%);border:2px solid #c99523;border-radius:26px;box-shadow:0 10px 30px rgba(0,0,0,.16)}
     .lions-mascot-zone{position:relative;height:235px;display:flex;justify-content:center;align-items:flex-end}
     .lions-real-cub{position:relative;z-index:3;height:225px;width:auto;max-width:92%;object-fit:contain;filter:drop-shadow(0 8px 6px rgba(0,0,0,.16))}
-    .lions-moving-ball{position:absolute;z-index:5;left:47%;bottom:10px;font-size:62px;line-height:1;filter:drop-shadow(0 6px 4px rgba(0,0,0,.24));transform-origin:center;animation:lionsBallTravel 7s ease-in-out infinite,lionsBallSpin 7s linear infinite}
+    .lions-moving-ball{position:absolute;z-index:5;left:51%;bottom:8px;font-size:49px;line-height:1;filter:drop-shadow(0 6px 4px rgba(0,0,0,.24));transform-origin:center;animation:lionsBallTravel 7s ease-in-out infinite,lionsBallSpin 7s linear infinite}
     @keyframes lionsBallTravel{0%,8%,38%,45%,78%,100%{left:51%}23%{left:13%}62%{left:84%}}
     @keyframes lionsBallSpin{0%{rotate:0deg}23%{rotate:-540deg}38%{rotate:0deg}62%{rotate:540deg}78%,100%{rotate:0deg}}
     .lions-brand-zone{position:relative;z-index:4;text-align:center;padding:12px 18px}
