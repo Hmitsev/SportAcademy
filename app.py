@@ -1391,16 +1391,24 @@ def fan_chat(user, team_id):
 
 def render_poll(poll,user,child=None):
     pid=child["id"] if child else None
-    old=fetchone("SELECT answer FROM poll_responses WHERE poll_id=%s AND user_id=%s AND player_id IS NOT DISTINCT FROM %s",(poll["id"],user["id"],pid))
+    old=fetchone("SELECT answer,created_at FROM poll_responses WHERE poll_id=%s AND user_id=%s AND player_id IS NOT DISTINCT FROM %s",(poll["id"],user["id"],pid))
+    answer_names={"yes":"Да","no":"Не","maybe":"Не съм сигурен/а"}
     with st.container(border=True):
         if poll.get("poll_type") == "match_attendance": st.write("**📊 Потвърждение за участие**")
         else:
             st.write(f"**📊 {poll['title']}**")
             if poll.get("question"): st.write(poll["question"])
+        if old and old.get("answer") in answer_names:
+            st.success(f"✅ Вие избрахте: **{answer_names[old['answer']]}**")
+            if old.get("created_at"):
+                st.caption(f"Последно записан отговор: {old['created_at']:%d.%m.%Y %H:%M}. Можете да промените избора си, докато анкетата е активна.")
         vals=["yes","no","maybe"]
-        ans=st.radio("Избор",vals,index=vals.index(old["answer"]) if old and old["answer"] in vals else 0,format_func=lambda x:{"yes":"Да","no":"Не","maybe":"Не съм сигурен/а"}[x],horizontal=True,key=f"poll_{poll['id']}_{pid or 0}")
-        if st.button("Запази отговора",key=f"poll_save_{poll['id']}_{pid or 0}",use_container_width=True):
-            execute("""INSERT INTO poll_responses(academy_id,poll_id,user_id,player_id,answer) VALUES(%s,%s,%s,%s,%s) ON CONFLICT (poll_id,user_id,(COALESCE(player_id,0))) DO UPDATE SET answer=EXCLUDED.answer,created_at=NOW()""",(ACADEMY_ID,poll["id"],user["id"],pid,ans)); set_flash("✅ Отговорът е записан успешно."); st.rerun()
+        ans=st.radio("Избор",vals,index=vals.index(old["answer"]) if old and old["answer"] in vals else 0,format_func=lambda x:answer_names[x],horizontal=True,key=f"poll_{poll['id']}_{pid or 0}")
+        button_label="🔄 Промени отговора" if old else "✅ Запази отговора"
+        if st.button(button_label,key=f"poll_save_{poll['id']}_{pid or 0}",use_container_width=True,type="primary"):
+            execute("""INSERT INTO poll_responses(academy_id,poll_id,user_id,player_id,answer) VALUES(%s,%s,%s,%s,%s) ON CONFLICT (poll_id,user_id,(COALESCE(player_id,0))) DO UPDATE SET answer=EXCLUDED.answer,created_at=NOW()""",(ACADEMY_ID,poll["id"],user["id"],pid,ans))
+            set_flash(f"✅ Отговорът е записан: {answer_names[ans]}. Можете да го промените, докато анкетата е активна.")
+            st.rerun()
 
 def payment_rows(team_id=None):
     extra=" AND pf.team_id=%s" if team_id else ""; params=(ACADEMY_ID,team_id) if team_id else (ACADEMY_ID,)
@@ -2563,12 +2571,13 @@ def results_statistics_panel(team):
 
 def parent_panel(user):
     parent_lions_banner(); parent_nav(); show_flash()
-    render_all_academy_birthday_banners()
+    page=st.session_state.parent_page
+    if page=="Начало":
+        render_all_academy_birthday_banners()
     players=parent_players(user["id"])
     if not players: st.info("Няма добавени деца към профила."); return
     labels={f"{p['first_name']} {p['last_name']}":p for p in players}; chosen=st.selectbox("Избрано дете",list(labels)); child=labels[chosen]
     st.caption(f"Група: {child.get('team_name') or 'Очаква свързване'} · Треньор: {child.get('coach_name') or 'Очаква свързване'}")
-    page=st.session_state.parent_page
     if child["approval_status"]!="approved": st.warning("Детето очаква одобрение и свързване с група от администратор.")
     if page=="Начало":
         unread = unread_notification_count(user["id"])
