@@ -1894,9 +1894,56 @@ def admin_shop_panel(user):
                 if st.button("Запази клубната наличност",key=f"save_club_{x['id']}"):execute("UPDATE club_inventory SET quantity=%s,updated_at=NOW() WHERE id=%s AND academy_id=%s",(q,x['id'],ACADEMY_ID));st.rerun()
 
 
+def match_poll_responses_excel(rows,match_title):
+    answer_names={"yes":"Да","no":"Не","maybe":"Не съм сигурен/а"}
+    data=[]
+    for row in rows:
+        data.append({
+            "Мач":match_title,
+            "Дете":f"{row.get('player_first') or ''} {row.get('player_last') or ''}".strip(),
+            "Родител":f"{row.get('parent_first') or ''} {row.get('parent_last') or ''}".strip(),
+            "Отговор":answer_names.get(row.get('answer'),row.get('answer') or "Без отговор"),
+            "Дата на отговора":row.get('created_at').replace(tzinfo=None) if row.get('created_at') and getattr(row.get('created_at'),'tzinfo',None) else row.get('created_at'),
+        })
+    out=io.BytesIO()
+    with pd.ExcelWriter(out,engine="openpyxl") as writer:
+        pd.DataFrame(data).to_excel(writer,index=False,sheet_name="Анкета за мача")
+        ws=writer.book["Анкета за мача"];ws.freeze_panes="A2";ws.auto_filter.ref=ws.dimensions
+        for col in ws.columns:ws.column_dimensions[col[0].column_letter].width=min(max(len(str(c.value or "")) for c in col)+2,38)
+    return out.getvalue()
+
+def render_match_poll_responses(match):
+    poll=fetchone("SELECT * FROM polls WHERE academy_id=%s AND event_id=%s AND poll_type='match_attendance' ORDER BY created_at DESC LIMIT 1",(ACADEMY_ID,match["id"]))
+    if not poll:
+        st.caption("За този мач няма изпратена анкета.")
+        return
+    rows=fetchall("""SELECT pr.answer,pr.created_at,p.first_name player_first,p.last_name player_last,
+        u.first_name parent_first,u.last_name parent_last
+        FROM poll_responses pr
+        JOIN users u ON u.id=pr.user_id
+        LEFT JOIN players p ON p.id=pr.player_id
+        WHERE pr.academy_id=%s AND pr.poll_id=%s
+        ORDER BY p.first_name,p.last_name,pr.created_at DESC""",(ACADEMY_ID,poll["id"]))
+    st.markdown("#### 📊 Отговори от родителите")
+    if not rows:
+        st.info("Все още няма отговори от родители.")
+        return
+    answer_names={"yes":"🟢 Да","no":"🔴 Не","maybe":"🟠 Не съм сигурен/а"}
+    for row in rows:
+        st.write(f"**{row.get('player_first') or 'Без дете'} {row.get('player_last') or ''}** · {answer_names.get(row.get('answer'),row.get('answer'))} · {row.get('parent_first') or ''} {row.get('parent_last') or ''}")
+    st.download_button(
+        f"📥 Excel: анкета за мача ({len(rows)} отговора)",
+        match_poll_responses_excel(rows,match["title"]),
+        f"match_poll_{match['id']}.xlsx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+        key=f"download_match_poll_{match['id']}",
+    )
+
 def coach_inventory_status_panel(user):
     st.subheader("📦 Клубен асортимент")
     st.caption("Треньорски достъп: виждаш текущия асортимент, състоянието и бройките. Създаване на нови артикули остава само за Admin.")
+    search_name=st.text_input("🔎 Търсене по име на артикул",placeholder="Напр. Адидас топки 2017",key="coach_inventory_name_search").strip().lower()
     c1,c2=st.columns(2)
     status=c1.selectbox("Филтър по състояние",["Всички","new","good","worn","damaged","retired"],format_func=lambda x:{"Всички":"Всички","new":"Ново","good":"Добро","worn":"Амортизирано","damaged":"Повредено","retired":"Бракувано"}.get(x,x),key="coach_inventory_condition")
     stock_filter=c2.selectbox("Филтър по наличност",["Всички","Има наличност","Изчерпани"],key="coach_inventory_stock")
@@ -1904,6 +1951,7 @@ def coach_inventory_status_panel(user):
     shown=0
     labels={"new":"Ново","good":"Добро","worn":"Амортизирано","damaged":"Повредено","retired":"Бракувано"}
     for row in rows:
+        if search_name and search_name not in (row.get('item_name') or '').lower():continue
         if status!="Всички" and row['condition_status']!=status:continue
         if stock_filter=="Има наличност" and row['quantity']<=0:continue
         if stock_filter=="Изчерпани" and row['quantity']!=0:continue
@@ -2105,6 +2153,34 @@ def render_birthday_banners(team_id=None,parent_user_id=None,key_prefix="birthda
             st.warning("Липсва файлът чрд.jpg в основната папка на проекта.")
             break
     return len(players)
+
+def render_all_academy_birthday_banners():
+    """Показва всички днешни рожденици: деца, треньори и специалисти."""
+    people=[]
+    for player in birthday_players():
+        people.append({
+            "person_key":f"player_{player['id']}",
+            "first_name":player.get("first_name") or "",
+            "last_name":player.get("last_name") or "",
+            "profile_image":player.get("profile_image"),
+            "profile_image_mime":player.get("profile_image_mime"),
+        })
+    for index,person in enumerate(staff_birthday_people()):
+        parts=(person.get("full_name") or "").strip().split(maxsplit=1)
+        people.append({
+            "person_key":f"staff_{index}_{person.get('full_name') or ''}",
+            "first_name":parts[0] if parts else "",
+            "last_name":parts[1] if len(parts)>1 else "",
+            "profile_image":person.get("profile_image"),
+            "profile_image_mime":person.get("profile_image_mime"),
+        })
+    seen=set()
+    for person in people:
+        if person["person_key"] in seen:continue
+        seen.add(person["person_key"])
+        banner=birthday_banner_bytes(person)
+        if banner:st.image(banner,use_container_width=True)
+    return len(seen)
 
 def registration_children(parent_user_id):
     return fetchall("""SELECT p.first_name,p.last_name,p.birth_date,t.name team_name,p.approval_status
@@ -2487,7 +2563,7 @@ def results_statistics_panel(team):
 
 def parent_panel(user):
     parent_lions_banner(); parent_nav(); show_flash()
-    render_birthday_banners(parent_user_id=user["id"],key_prefix="parent_birthday")
+    render_all_academy_birthday_banners()
     players=parent_players(user["id"])
     if not players: st.info("Няма добавени деца към профила."); return
     labels={f"{p['first_name']} {p['last_name']}":p for p in players}; chosen=st.selectbox("Избрано дете",list(labels)); child=labels[chosen]
@@ -3126,8 +3202,7 @@ def specialist_panel(user):
     if not teams:st.info("Все още няма зачислени набори към този профил.");return
     tmap={t["name"]:t for t in teams};team=tmap[st.selectbox("Набор",list(tmap),key="specialist_team")]
     if sec=="Табло":
-        render_birthday_banners(team_id=team["id"],key_prefix=f"specialist_birthday_{team['id']}")
-        render_staff_birthday_banners()
+        render_all_academy_birthday_banners()
         players=fetchone("SELECT COUNT(*) c FROM players WHERE academy_id=%s AND team_id=%s AND active AND approval_status='approved'",(ACADEMY_ID,team["id"]))["c"]
         upcoming=fetchone("SELECT COUNT(*) c FROM events WHERE academy_id=%s AND team_id=%s AND starts_at>=NOW() AND status<>'cancelled'",(ACADEMY_ID,team["id"]))["c"]
         c1,c2=st.columns(2);c1.metric("Деца в набора",players);c2.metric("Предстоящи събития",upcoming)
@@ -3243,6 +3318,7 @@ def admin_dyulgerov_panel(user):
     tmap={t["name"]:t for t in teams}; team=tmap[st.selectbox("Набор",list(tmap),key="dyulgerov_team")]
     view=st.radio("Меню",["Табло","🏃 Тренировъчен график","📅 Създаден график","⚽ Създаване МАЧ","Мачове","🏆 Резултати","🛍️ Екипировка / Аксесоари","Съобщение"],horizontal=True,key="dyulgerov_view",label_visibility="collapsed")
     if view=="Табло":
+        render_all_academy_birthday_banners()
         players=fetchone("SELECT COUNT(*) c FROM players WHERE academy_id=%s AND team_id=%s AND active AND approval_status='approved'",(ACADEMY_ID,team["id"]))["c"]
         upcoming=fetchone("SELECT COUNT(*) c FROM events WHERE academy_id=%s AND team_id=%s AND starts_at>=NOW() AND status<>'cancelled'",(ACADEMY_ID,team["id"]))["c"]
         messages=fetchone("SELECT COUNT(*) c FROM team_messages WHERE academy_id=%s AND team_id=%s",(ACADEMY_ID,team["id"]))["c"]
@@ -3299,8 +3375,7 @@ def admin_panel(user):
         )
 
     if sec == "ТАБЛО":
-        render_birthday_banners(key_prefix="admin_birthday")
-        render_staff_birthday_banners()
+        render_all_academy_birthday_banners()
         vals = [
             fetchone("SELECT COUNT(*) c FROM users WHERE academy_id=%s AND account_status='pending'", (ACADEMY_ID,))["c"],
             fetchone("SELECT COUNT(*) c FROM players WHERE academy_id=%s AND approval_status='pending'", (ACADEMY_ID,))["c"],
@@ -3722,8 +3797,7 @@ def coach_panel(user):
     team = tmap[team_name]
 
     if sec == "Табло":
-        render_birthday_banners(team_id=team["id"],key_prefix=f"coach_birthday_{team['id']}")
-        render_staff_birthday_banners()
+        render_all_academy_birthday_banners()
         players=fetchall("SELECT * FROM players WHERE academy_id=%s AND team_id=%s AND approval_status='approved' AND active ORDER BY first_name,last_name",(ACADEMY_ID,team["id"]))
         events=fetchone("SELECT COUNT(*) c FROM events WHERE academy_id=%s AND team_id=%s AND starts_at>=NOW()",(ACADEMY_ID,team["id"]))["c"]
         c1,c2=st.columns(2); c1.metric("Деца в групата",len(players)); c2.metric("Предстоящи събития",events)
@@ -3824,12 +3898,7 @@ def coach_panel(user):
                     else:
                         set_flash("⚠️ Групата е запазена, но няма активни одобрени родители за уведомяване.","warning")
                     st.rerun()
-        elif squad_section == "🧩 Match Day":
-            match_day_panel(user,team)
-        elif squad_section == "🏆 Резултати":
-            results_statistics_panel(team)
-        else:
-            coach_player_statistics(user,team)
+                render_match_poll_responses(match)
     elif sec == "Присъствие":
         events = fetchall("SELECT * FROM events WHERE academy_id=%s AND team_id=%s ORDER BY starts_at DESC LIMIT 40", (ACADEMY_ID, team["id"]))
         if not events: st.info("Първо създай тренировка или мач.")
