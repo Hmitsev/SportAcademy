@@ -14,7 +14,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from psycopg2.pool import ThreadedConnectionPool
 import streamlit as st
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 APP_DIR = Path(__file__).parent
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
@@ -27,6 +27,7 @@ ASSETS = {
     "coming": APP_DIR / "очаква се.jpg",
     "code": APP_DIR / "кодекс.jpg",
     "match_template": APP_DIR / "Designer.jpg",
+    "birthday_template": APP_DIR / "чрд.jpg",
 }
 
 st.set_page_config(page_title="Dyulgerov Academy", page_icon="⚽", layout="wide", initial_sidebar_state="collapsed")
@@ -2021,6 +2022,91 @@ def parent_lions_banner():
     st.markdown(html.replace("__LION_SRC__",lion_src),unsafe_allow_html=True)
 
 
+def birthday_players(team_id=None,parent_user_id=None):
+    where=["p.academy_id=%s","p.active","p.approval_status='approved'","p.birth_date IS NOT NULL","EXTRACT(MONTH FROM p.birth_date)=EXTRACT(MONTH FROM CURRENT_DATE)","EXTRACT(DAY FROM p.birth_date)=EXTRACT(DAY FROM CURRENT_DATE)"]
+    params=[ACADEMY_ID]
+    joins=""
+    if team_id is not None:
+        where.append("p.team_id=%s");params.append(team_id)
+    if parent_user_id is not None:
+        joins=" JOIN parent_players pp ON pp.player_id=p.id AND pp.academy_id=p.academy_id "
+        where.append("pp.parent_user_id=%s");params.append(parent_user_id)
+    return fetchall(f"""SELECT DISTINCT p.id,p.first_name,p.last_name,p.birth_date,p.profile_image,p.profile_image_mime,t.name team_name
+        FROM players p {joins} LEFT JOIN teams t ON t.id=p.team_id
+        WHERE {' AND '.join(where)} ORDER BY p.first_name,p.last_name""",tuple(params))
+
+def birthday_banner_bytes(player):
+    template_path=ASSETS["birthday_template"]
+    if not template_path.exists():
+        return None
+    image=Image.open(template_path).convert("RGB")
+    draw=ImageDraw.Draw(image)
+    width,height=image.size
+    # Празното поле в шаблона е приблизително x=8%-92%, y=60.2%-70.7%.
+    left,right=int(width*.08),int(width*.92)
+    top,bottom=int(height*.602),int(height*.707)
+    draw.rounded_rectangle((left,top,right,bottom),radius=max(18,int(width*.025)),fill=(8,8,10),outline=(205,153,42),width=max(4,int(width*.006)))
+    photo_size=int((bottom-top)*.68)
+    text_left=left+int(width*.035)
+    if player.get("profile_image"):
+        try:
+            photo=Image.open(io.BytesIO(bytes(player["profile_image"]))).convert("RGB")
+            photo=ImageOps.fit(photo,(photo_size,photo_size),method=Image.Resampling.LANCZOS)
+            mask=Image.new("L",(photo_size,photo_size),0);ImageDraw.Draw(mask).ellipse((0,0,photo_size-1,photo_size-1),fill=255)
+            px=left+int(width*.035);py=top+(bottom-top-photo_size)//2
+            border=Image.new("RGB",(photo_size+10,photo_size+10),(205,153,42))
+            border_mask=Image.new("L",border.size,0);ImageDraw.Draw(border_mask).ellipse((0,0,border.size[0]-1,border.size[1]-1),fill=255)
+            image.paste(border,(px-5,py-5),border_mask);image.paste(photo,(px,py),mask)
+            text_left=px+photo_size+int(width*.04)
+        except Exception:
+            pass
+    name=f"{player['first_name']} {player['last_name']}".strip().upper()
+    font_paths=["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf","/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf"]
+    font_path=next((fp for fp in font_paths if Path(fp).exists()),None)
+    if not font_path:return None
+    max_width=right-text_left-int(width*.035)
+    font_size=max(28,int(height*.045))
+    while font_size>24:
+        font=ImageFont.truetype(font_path,font_size)
+        box=draw.textbbox((0,0),name,font=font,stroke_width=2)
+        if box[2]-box[0]<=max_width:break
+        font_size-=2
+    box=draw.textbbox((0,0),name,font=font,stroke_width=2)
+    x=text_left+(max_width-(box[2]-box[0]))//2
+    y=top+(bottom-top-(box[3]-box[1]))//2-box[1]
+    draw.text((x,y),name,font=font,fill=(247,207,96),stroke_width=2,stroke_fill=(45,25,0))
+    out=io.BytesIO();image.save(out,format="JPEG",quality=88,optimize=True)
+    return out.getvalue()
+
+def render_birthday_banners(team_id=None,parent_user_id=None,key_prefix="birthday"):
+    players=birthday_players(team_id=team_id,parent_user_id=parent_user_id)
+    for player in players:
+        banner=birthday_banner_bytes(player)
+        if banner:
+            st.image(banner,use_container_width=True)
+        else:
+            st.warning("Липсва файлът чрд.jpg в основната папка на проекта.")
+            break
+    return len(players)
+
+def registration_children(parent_user_id):
+    return fetchall("""SELECT p.first_name,p.last_name,p.birth_date,t.name team_name,p.approval_status
+        FROM parent_players pp JOIN players p ON p.id=pp.player_id
+        LEFT JOIN teams t ON t.id=p.team_id
+        WHERE pp.academy_id=%s AND pp.parent_user_id=%s
+        ORDER BY p.first_name,p.last_name""",(ACADEMY_ID,parent_user_id))
+
+def render_registration_children(parent_user_id):
+    children=registration_children(parent_user_id)
+    if not children:
+        st.caption("Няма добавени деца към тази регистрация.")
+        return
+    st.markdown("**Деца в регистрацията:**")
+    for child in children:
+        birth=child.get("birth_date")
+        birth_text=birth.strftime("%d.%m.%Y") if birth else "Липсва дата на раждане"
+        st.write(f"• {child['first_name']} {child['last_name']} · 🎂 {birth_text} · {child.get('team_name') or 'Без набор'}")
+
 def parent_nav():
     items=[("🏠 Начало","Начало"),("📅 Тренировки","Тренировки"),("⚽ Мачове","Мачове"),("💬 Съобщение от треньор","Съобщения"),("💰 Такси и Поръчки","Такси"),("ℹ️ Информация","Информация"),("📝 Обратна връзка","Обратна връзка"),("🗣️ ФЕН ЧАТ","ФЕН ЧАТ"),("👤 Настройки","Настройки")]
     st.session_state.setdefault("parent_page","Начало")
@@ -2383,7 +2469,9 @@ def results_statistics_panel(team):
     render_results_dashboard(team,editable=True,key_prefix="coach_results")
 
 def parent_panel(user):
-    parent_lions_banner(); parent_nav(); show_flash(); players=parent_players(user["id"])
+    parent_lions_banner(); parent_nav(); show_flash()
+    render_birthday_banners(parent_user_id=user["id"],key_prefix="parent_birthday")
+    players=parent_players(user["id"])
     if not players: st.info("Няма добавени деца към профила."); return
     labels={f"{p['first_name']} {p['last_name']}":p for p in players}; chosen=st.selectbox("Избрано дете",list(labels)); child=labels[chosen]
     st.caption(f"Група: {child.get('team_name') or 'Очаква свързване'} · Треньор: {child.get('coach_name') or 'Очаква свързване'}")
@@ -3020,6 +3108,7 @@ def specialist_panel(user):
     if not teams:st.info("Все още няма зачислени набори към този профил.");return
     tmap={t["name"]:t for t in teams};team=tmap[st.selectbox("Набор",list(tmap),key="specialist_team")]
     if sec=="Табло":
+        render_birthday_banners(team_id=team["id"],key_prefix=f"specialist_birthday_{team['id']}")
         players=fetchone("SELECT COUNT(*) c FROM players WHERE academy_id=%s AND team_id=%s AND active AND approval_status='approved'",(ACADEMY_ID,team["id"]))["c"]
         upcoming=fetchone("SELECT COUNT(*) c FROM events WHERE academy_id=%s AND team_id=%s AND starts_at>=NOW() AND status<>'cancelled'",(ACADEMY_ID,team["id"]))["c"]
         c1,c2=st.columns(2);c1.metric("Деца в набора",players);c2.metric("Предстоящи събития",upcoming)
@@ -3189,6 +3278,7 @@ def admin_panel(user):
         )
 
     if sec == "ТАБЛО":
+        render_birthday_banners(key_prefix="admin_birthday")
         vals = [
             fetchone("SELECT COUNT(*) c FROM users WHERE academy_id=%s AND account_status='pending'", (ACADEMY_ID,))["c"],
             fetchone("SELECT COUNT(*) c FROM players WHERE academy_id=%s AND approval_status='pending'", (ACADEMY_ID,))["c"],
@@ -3221,7 +3311,9 @@ def admin_panel(user):
             if not rows: st.info("Няма чакащи регистрации.")
             for r in rows:
                 c1, c2, c3 = st.columns([5, 1, 1])
-                c1.write(f"🔴 **{r['first_name']} {r['last_name']}** · {r['email']}")
+                c1.write(f"🔴 **{r['first_name']} {r['last_name']}** · {r['email']} · {r.get('phone') or 'Без телефон'}")
+                with c1:
+                    render_registration_children(r["id"])
                 if c2.button("Одобри", key=f"au{r['id']}"):
                     execute("UPDATE users SET account_status='approved' WHERE id=%s AND academy_id=%s", (r["id"], ACADEMY_ID)); st.rerun()
                 if c3.button("Откажи", key=f"ar{r['id']}"):
@@ -3230,7 +3322,9 @@ def admin_panel(user):
             rows = fetchall("""SELECT DISTINCT u.* FROM users u LEFT JOIN parent_players pp ON pp.parent_user_id=u.id LEFT JOIN players p ON p.id=pp.player_id WHERE u.academy_id=%s AND u.role='parent' AND u.account_status='approved' AND (%s IS NULL OR p.team_id=%s) ORDER BY u.created_at DESC""", (ACADEMY_ID,registration_team_id,registration_team_id))
             if not rows: st.info("Архивът е празен.")
             for r in rows:
-                with st.expander(f"🟢 {r['first_name']} {r['last_name']} · {r['email']}"):
+                with st.expander(f"🟢 {r['first_name']} {r['last_name']} · {r['email']} · {r.get('phone') or 'Без телефон'}"):
+                    render_registration_children(r["id"])
+                    st.divider()
                     st.caption("Ако родителят е забравил паролата, Admin може да зададе временна парола. След това родителят я сменя от Настройки.")
                     temporary_password = st.text_input(
                         "Временна парола",
@@ -3606,6 +3700,7 @@ def coach_panel(user):
     team = tmap[team_name]
 
     if sec == "Табло":
+        render_birthday_banners(team_id=team["id"],key_prefix=f"coach_birthday_{team['id']}")
         players=fetchall("SELECT * FROM players WHERE academy_id=%s AND team_id=%s AND approval_status='approved' AND active ORDER BY first_name,last_name",(ACADEMY_ID,team["id"]))
         events=fetchone("SELECT COUNT(*) c FROM events WHERE academy_id=%s AND team_id=%s AND starts_at>=NOW()",(ACADEMY_ID,team["id"]))["c"]
         c1,c2=st.columns(2); c1.metric("Деца в групата",len(players)); c2.metric("Предстоящи събития",events)
