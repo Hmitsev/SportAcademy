@@ -976,7 +976,6 @@ def client_panel():
     st.markdown('<div class="hero">', unsafe_allow_html=True)
     c1, c2, c3 = st.columns([1, 2, 1])
     with c2:
-        st.image(APP_DIR / "Designer (27).jpg")
     st.markdown(
         f"<p style='text-align:center;color:white;'>Здравей, {user['first_name']}.</p>",
         unsafe_allow_html=True,
@@ -1410,7 +1409,6 @@ if "role" not in st.session_state:
     c1, c2, c3 = st.columns([1, 2, 1])
 
     with c2:
-        st.image(APP_DIR / "Designer (27).jpg")
 
     st.markdown(
         "<p style='text-align:center;color:white;font-size:18px;'>"
