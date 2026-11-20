@@ -477,10 +477,12 @@ def init_db():
         """ALTER TABLE players ADD COLUMN IF NOT EXISTS profile_image_mime TEXT""",
         """ALTER TABLE coaches ADD COLUMN IF NOT EXISTS profile_image BYTEA""",
         """ALTER TABLE coaches ADD COLUMN IF NOT EXISTS profile_image_mime TEXT""",
+        """ALTER TABLE coaches ADD COLUMN IF NOT EXISTS birth_date DATE""",
         """ALTER TABLE specialist_profiles DROP CONSTRAINT IF EXISTS specialist_profiles_specialist_type_check""",
         """ALTER TABLE specialist_profiles ADD CONSTRAINT specialist_profiles_specialist_type_check CHECK(specialist_type IN ('conditioning','goalkeeper','medical','psychologist','other'))""",
         """ALTER TABLE specialist_profiles ADD COLUMN IF NOT EXISTS profile_image BYTEA""",
         """ALTER TABLE specialist_profiles ADD COLUMN IF NOT EXISTS profile_image_mime TEXT""",
+        """ALTER TABLE specialist_profiles ADD COLUMN IF NOT EXISTS birth_date DATE""",
         """ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_image BYTEA""",
         """ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_image_mime TEXT""",
         """ALTER TABLE academies ALTER COLUMN default_fee SET DEFAULT 35.00""",
@@ -2022,6 +2024,21 @@ def parent_lions_banner():
     st.markdown(html.replace("__LION_SRC__",lion_src),unsafe_allow_html=True)
 
 
+def staff_birthday_people():
+    return fetchall("""SELECT c.display_name full_name,c.birth_date,c.profile_image,c.profile_image_mime FROM coaches c
+        WHERE c.academy_id=%s AND c.active AND c.birth_date IS NOT NULL AND EXTRACT(MONTH FROM c.birth_date)=EXTRACT(MONTH FROM CURRENT_DATE) AND EXTRACT(DAY FROM c.birth_date)=EXTRACT(DAY FROM CURRENT_DATE)
+        UNION ALL SELECT sp.display_name,sp.birth_date,sp.profile_image,sp.profile_image_mime FROM specialist_profiles sp JOIN users u ON u.id=sp.user_id
+        WHERE sp.academy_id=%s AND sp.active AND u.active AND sp.birth_date IS NOT NULL AND EXTRACT(MONTH FROM sp.birth_date)=EXTRACT(MONTH FROM CURRENT_DATE) AND EXTRACT(DAY FROM sp.birth_date)=EXTRACT(DAY FROM CURRENT_DATE)
+        ORDER BY full_name""",(ACADEMY_ID,ACADEMY_ID))
+
+def render_staff_birthday_banners():
+    people=staff_birthday_people()
+    for person in people:
+        parts=(person.get("full_name") or "").strip().split(maxsplit=1)
+        banner=birthday_banner_bytes({"first_name":parts[0] if parts else "","last_name":parts[1] if len(parts)>1 else "","profile_image":person.get("profile_image"),"profile_image_mime":person.get("profile_image_mime")})
+        if banner:st.image(banner,use_container_width=True)
+    return len(people)
+
 def birthday_players(team_id=None,parent_user_id=None):
     where=["p.academy_id=%s","p.active","p.approval_status='approved'","p.birth_date IS NOT NULL","EXTRACT(MONTH FROM p.birth_date)=EXTRACT(MONTH FROM CURRENT_DATE)","EXTRACT(DAY FROM p.birth_date)=EXTRACT(DAY FROM CURRENT_DATE)"]
     params=[ACADEMY_ID]
@@ -2962,10 +2979,11 @@ def coach_account_manager():
                 ib,im=valid_profile_image(image)
                 if ib: execute("UPDATE coaches SET profile_image=%s,profile_image_mime=%s WHERE id=%s AND academy_id=%s",(ib,im,coach["id"],ACADEMY_ID));set_flash("✅ Снимката е запазена.");st.rerun()
         name=st.text_input("Име на треньора",coach["display_name"],key=f"coach_name_{coach['id']}")
+        coach_birth_date=st.date_input("🎂 Дата на раждане",value=coach.get("birth_date") or date(1990,1,1),min_value=date(1940,1,1),max_value=date.today(),key=f"coach_birth_date_{coach['id']}")
         email=st.text_input("Имейл за вход",coach.get("email") or "",key=f"coach_email_{coach['id']}").strip().lower()
         password=st.text_input("Нова / начална парола",type="password",key=f"coach_pw_{coach['id']}")
         c1,c2=st.columns(2)
-        if c1.button("Запази име",key=f"coach_save_name_{coach['id']}",use_container_width=True): execute("UPDATE coaches SET display_name=%s WHERE id=%s AND academy_id=%s",(name.strip(),coach["id"],ACADEMY_ID));set_flash("✅ Името е запазено.");st.rerun()
+        if c1.button("Запази име",key=f"coach_save_name_{coach['id']}",use_container_width=True): execute("UPDATE coaches SET display_name=%s,birth_date=%s WHERE id=%s AND academy_id=%s",(name.strip(),coach_birth_date,coach["id"],ACADEMY_ID));set_flash("✅ Името е запазено.");st.rerun()
         if c2.button("Създай / обнови достъп",key=f"coach_access_{coach['id']}",use_container_width=True):
             if not email or len(password)<8: st.error("Въведи валиден имейл и парола с минимум 8 символа.")
             else:
@@ -2974,7 +2992,7 @@ def coach_account_manager():
                     uid=existing["id"];execute("UPDATE users SET first_name=%s,last_name='Треньор',password_hash=%s,role='coach',account_status='approved',active=TRUE WHERE id=%s AND academy_id=%s",(name.strip(),hash_password(password),uid,ACADEMY_ID))
                 else:
                     uid=execute("INSERT INTO users(academy_id,first_name,last_name,email,password_hash,role,account_status) VALUES(%s,%s,'Треньор',%s,%s,'coach','approved') RETURNING id",(ACADEMY_ID,name.strip(),email,hash_password(password)),True)["id"]
-                execute("UPDATE coaches SET user_id=%s,display_name=%s WHERE id=%s AND academy_id=%s",(uid,name.strip(),coach["id"],ACADEMY_ID));set_flash("✅ Треньорският достъп е готов.");st.rerun()
+                execute("UPDATE coaches SET user_id=%s,display_name=%s,birth_date=%s WHERE id=%s AND academy_id=%s",(uid,name.strip(),coach_birth_date,coach["id"],ACADEMY_ID));set_flash("✅ Треньорският достъп е готов.");st.rerun()
 
 SPECIALIST_TYPE_LABELS={
     "conditioning":"Кондиционен треньор",
@@ -3109,6 +3127,7 @@ def specialist_panel(user):
     tmap={t["name"]:t for t in teams};team=tmap[st.selectbox("Набор",list(tmap),key="specialist_team")]
     if sec=="Табло":
         render_birthday_banners(team_id=team["id"],key_prefix=f"specialist_birthday_{team['id']}")
+        render_staff_birthday_banners()
         players=fetchone("SELECT COUNT(*) c FROM players WHERE academy_id=%s AND team_id=%s AND active AND approval_status='approved'",(ACADEMY_ID,team["id"]))["c"]
         upcoming=fetchone("SELECT COUNT(*) c FROM events WHERE academy_id=%s AND team_id=%s AND starts_at>=NOW() AND status<>'cancelled'",(ACADEMY_ID,team["id"]))["c"]
         c1,c2=st.columns(2);c1.metric("Деца в набора",players);c2.metric("Предстоящи събития",upcoming)
@@ -3167,6 +3186,7 @@ def admin_specialist_manager(admin_user):
         c1,c2=st.columns(2);name=c1.text_input("Име и фамилия");email=c2.text_input("Имейл за вход").strip().lower()
         typ=c1.selectbox("Вид профил",list(SPECIALIST_TYPE_LABELS),format_func=specialist_role_label)
         qualification=c2.text_input("Квалификация / длъжност",placeholder="Напр. кондиционен треньор, физиотерапевт")
+        specialist_birth_date=st.date_input("🎂 Дата на раждане",value=date(1990,1,1),min_value=date(1940,1,1),max_value=date.today(),key="new_specialist_birth_date")
         password=st.text_input("Начална парола",type="password")
         create=st.form_submit_button("Създай профила",use_container_width=True)
     if create:
@@ -3176,9 +3196,9 @@ def admin_specialist_manager(admin_user):
             existing=fetchone("SELECT id FROM users WHERE academy_id=%s AND lower(email)=lower(%s)",(ACADEMY_ID,email))
             if existing:uid=existing["id"];execute("UPDATE users SET first_name=%s,last_name=%s,password_hash=%s,role='specialist',account_status='approved',active=TRUE WHERE id=%s AND academy_id=%s",(first,last,hash_password(password),uid,ACADEMY_ID))
             else:uid=execute("INSERT INTO users(academy_id,first_name,last_name,email,password_hash,role,account_status) VALUES(%s,%s,%s,%s,%s,'specialist','approved') RETURNING id",(ACADEMY_ID,first,last,email,hash_password(password)),True)["id"]
-            execute("""INSERT INTO specialist_profiles(academy_id,user_id,display_name,specialist_type,qualification,active)
-                VALUES(%s,%s,%s,%s,%s,TRUE) ON CONFLICT(user_id) DO UPDATE SET display_name=EXCLUDED.display_name,
-                specialist_type=EXCLUDED.specialist_type,qualification=EXCLUDED.qualification,active=TRUE""",(ACADEMY_ID,uid,name.strip(),typ,qualification.strip() or None))
+            execute("""INSERT INTO specialist_profiles(academy_id,user_id,display_name,specialist_type,qualification,birth_date,active)
+                VALUES(%s,%s,%s,%s,%s,%s,TRUE) ON CONFLICT(user_id) DO UPDATE SET display_name=EXCLUDED.display_name,
+                specialist_type=EXCLUDED.specialist_type,qualification=EXCLUDED.qualification,birth_date=EXCLUDED.birth_date,active=TRUE""",(ACADEMY_ID,uid,name.strip(),typ,qualification.strip() or None,specialist_birth_date))
             set_flash("✅ Профилът на специалиста е създаден.");st.rerun()
     profiles=fetchall("""SELECT sp.*,u.email,u.active user_active FROM specialist_profiles sp JOIN users u ON u.id=sp.user_id
         WHERE sp.academy_id=%s ORDER BY sp.active DESC,sp.display_name""",(ACADEMY_ID,))
@@ -3192,6 +3212,7 @@ def admin_specialist_manager(admin_user):
                 if st.button("Запази снимката",key=f"save_specialist_image_{sp['id']}"):
                     ib,im=valid_profile_image(specialist_image)
                     if ib:execute("UPDATE specialist_profiles SET profile_image=%s,profile_image_mime=%s WHERE id=%s AND academy_id=%s",(ib,im,sp["id"],ACADEMY_ID));set_flash("✅ Снимката на специалиста е запазена.");st.rerun()
+            specialist_birth_edit=st.date_input("🎂 Дата на раждане",value=sp.get("birth_date") or date(1990,1,1),min_value=date(1940,1,1),max_value=date.today(),key=f"specialist_birth_date_{sp['id']}")
             assigned={r["team_id"] for r in fetchall("SELECT team_id FROM specialist_teams WHERE academy_id=%s AND specialist_user_id=%s",(ACADEMY_ID,sp["user_id"]))}
             selected=st.multiselect("Зачислени набори",options=[t["id"] for t in teams],default=list(assigned),format_func=lambda tid:next(t["name"] for t in teams if t["id"]==tid),key=f"specialist_teams_{sp['id']}")
             active=st.checkbox("Активен профил",sp["active"] and sp["user_active"],key=f"specialist_active_{sp['id']}")
@@ -3200,7 +3221,7 @@ def admin_specialist_manager(admin_user):
                 with db() as conn,conn.cursor() as cur:
                     cur.execute("DELETE FROM specialist_teams WHERE academy_id=%s AND specialist_user_id=%s",(ACADEMY_ID,sp["user_id"]))
                     for team_id in selected:cur.execute("INSERT INTO specialist_teams(academy_id,specialist_user_id,team_id,assigned_by) VALUES(%s,%s,%s,%s)",(ACADEMY_ID,sp["user_id"],team_id,admin_user["id"]))
-                    cur.execute("UPDATE specialist_profiles SET active=%s WHERE id=%s AND academy_id=%s",(active,sp["id"],ACADEMY_ID));cur.execute("UPDATE users SET active=%s WHERE id=%s AND academy_id=%s",(active,sp["user_id"],ACADEMY_ID))
+                    cur.execute("UPDATE specialist_profiles SET active=%s,birth_date=%s WHERE id=%s AND academy_id=%s",(active,specialist_birth_edit,sp["id"],ACADEMY_ID));cur.execute("UPDATE users SET active=%s WHERE id=%s AND academy_id=%s",(active,sp["user_id"],ACADEMY_ID))
                 set_flash("✅ Наборите и достъпът са обновени.");st.rerun()
             if b.button("📨 Съобщение",key=f"toggle_specialist_message_{sp['id']}",use_container_width=True):st.session_state[f"show_specialist_message_{sp['id']}"]=not st.session_state.get(f"show_specialist_message_{sp['id']}",False);st.rerun()
             if st.session_state.get(f"show_specialist_message_{sp['id']}"):
@@ -3279,6 +3300,7 @@ def admin_panel(user):
 
     if sec == "ТАБЛО":
         render_birthday_banners(key_prefix="admin_birthday")
+        render_staff_birthday_banners()
         vals = [
             fetchone("SELECT COUNT(*) c FROM users WHERE academy_id=%s AND account_status='pending'", (ACADEMY_ID,))["c"],
             fetchone("SELECT COUNT(*) c FROM players WHERE academy_id=%s AND approval_status='pending'", (ACADEMY_ID,))["c"],
@@ -3701,6 +3723,7 @@ def coach_panel(user):
 
     if sec == "Табло":
         render_birthday_banners(team_id=team["id"],key_prefix=f"coach_birthday_{team['id']}")
+        render_staff_birthday_banners()
         players=fetchall("SELECT * FROM players WHERE academy_id=%s AND team_id=%s AND approval_status='approved' AND active ORDER BY first_name,last_name",(ACADEMY_ID,team["id"]))
         events=fetchone("SELECT COUNT(*) c FROM events WHERE academy_id=%s AND team_id=%s AND starts_at>=NOW()",(ACADEMY_ID,team["id"]))["c"]
         c1,c2=st.columns(2); c1.metric("Деца в групата",len(players)); c2.metric("Предстоящи събития",events)
