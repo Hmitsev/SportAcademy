@@ -1761,6 +1761,26 @@ def shop_orders_excel(rows):
         for col in ws.columns:ws.column_dimensions[col[0].column_letter].width=min(max(len(str(c.value or '')) for c in col)+2,38)
     return out.getvalue()
 
+def club_inventory_excel(rows):
+    condition_names={"new":"Ново","good":"Добро","worn":"Амортизирано","damaged":"Повредено","retired":"Бракувано"}
+    data=[]
+    for r in rows:
+        quantity=int(r.get("quantity") or 0)
+        data.append({
+            "№":r["id"],"Артикул":r["item_name"],"Категория":r.get("category") or "",
+            "Количество":quantity,"Статус наличност":"Има наличност" if quantity>0 else "Изчерпан",
+            "Състояние":condition_names.get(r.get("condition_status"),r.get("condition_status") or ""),
+            "Дата на закупуване":r.get("purchase_date"),"Планирана подмяна":r.get("replacement_due"),
+            "Бележка":r.get("note") or "","Активен":"Да" if r.get("active") else "Не",
+            "Последна актуализация":r.get("updated_at").replace(tzinfo=None) if r.get("updated_at") and getattr(r.get("updated_at"),"tzinfo",None) else r.get("updated_at"),
+        })
+    out=io.BytesIO()
+    with pd.ExcelWriter(out,engine="openpyxl") as writer:
+        pd.DataFrame(data).to_excel(writer,index=False,sheet_name="Клубен асортимент")
+        ws=writer.book["Клубен асортимент"];ws.freeze_panes="A2";ws.auto_filter.ref=ws.dimensions
+        for col in ws.columns:ws.column_dimensions[col[0].column_letter].width=min(max(len(str(cell.value or "")) for cell in col)+2,40)
+    return out.getvalue()
+
 def admin_shop_panel(user):
     st.subheader("🛍️ Екипировка / Аксесоари")
     st.info("Този модул е онлайн магазинът за родители и складовата наличност. Разходите се въвеждат само от отделния бутон „Разход“.")
@@ -1812,6 +1832,21 @@ def admin_shop_panel(user):
         all_orders=fetchall("""SELECT o.*,p.name product_name,u.first_name,u.last_name,pl.first_name player_first,pl.last_name player_last
                               FROM shop_orders o JOIN shop_products p ON p.id=o.product_id LEFT JOIN users u ON u.id=COALESCE(o.requester_user_id,o.parent_user_id) LEFT JOIN players pl ON pl.id=o.player_id
                               WHERE o.academy_id=%s ORDER BY o.created_at DESC""",(ACADEMY_ID,))
+        export_status=st.selectbox(
+            "Статус за Excel",
+            ["Всички","new","reviewed","available","ordered","ready","delivered","cancelled"],
+            format_func=lambda x:{"Всички":"Всички статуси","new":"Нови заявки","reviewed":"Прегледани","available":"Има наличност","ordered":"Поръчано от доставчик","ready":"Готови за получаване","delivered":"Получени","cancelled":"Отказани"}.get(x,x),
+            key="shop_orders_export_status",
+        )
+        export_orders=all_orders if export_status=="Всички" else [row for row in all_orders if row["fulfilment_status"]==export_status]
+        st.download_button(
+            f"📥 Excel: заявки с избрания статус ({len(export_orders)})",
+            shop_orders_excel(export_orders),
+            "academy_shop_orders_current_status.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            key="download_shop_orders_current_status",
+        )
         for o in all_orders:
             if flt=="Чакащи плащане" and o['payment_status']!='pending':continue
             if flt=="Платени" and o['payment_status']!='paid':continue
@@ -1820,7 +1855,7 @@ def admin_shop_panel(user):
             if flt=="Приключени" and o['fulfilment_status'] not in ('delivered','cancelled'):continue
             with st.expander(f"{o['product_name']} · {o.get('selected_size') or ''} · {o['player_first']} {o['player_last']} · {o['unit_price']*o['quantity']:.2f} €"):
                 pay=st.selectbox("Плащане",["pending","paid","rejected"],index=["pending","paid","rejected"].index(o['payment_status']),format_func=lambda x:{"pending":"Чака потвърждение","paid":"Платено","rejected":"Отказано"}[x],key=f"order_pay_{o['id']}")
-                fulfil=st.selectbox("Изпълнение",["new","reviewed","available","ordered","ready","delivered","cancelled"],index=["new","available","ordered","ready","delivered","cancelled"].index(o['fulfilment_status']),format_func=lambda x:{"new":"Нова заявка","reviewed":"Заявката е прегледана","available":"Има наличност","ordered":"Поръчано от доставчик","ready":"Готово за получаване","delivered":"Получено","cancelled":"Отказано"}[x],key=f"order_fulfil_{o['id']}")
+                fulfil=st.selectbox("Изпълнение",["new","reviewed","available","ordered","ready","delivered","cancelled"],index=["new","reviewed","available","ordered","ready","delivered","cancelled"].index(o['fulfilment_status']),format_func=lambda x:{"new":"Нова заявка","reviewed":"Заявката е прегледана","available":"Има наличност","ordered":"Поръчано от доставчик","ready":"Готово за получаване","delivered":"Получено","cancelled":"Отказано"}[x],key=f"order_fulfil_{o['id']}")
                 comment=st.text_area("Съобщение към родителя",value=o.get('admin_comment') or '',key=f"order_comment_{o['id']}")
                 if st.button("Потвърди и изпрати статуса",key=f"save_order_{o['id']}",use_container_width=True):
                     was_paid=o['payment_status']=='paid'
@@ -1836,14 +1871,51 @@ def admin_shop_panel(user):
         if add and item.strip():execute("INSERT INTO club_inventory(academy_id,item_name,category,quantity,condition_status,note,created_by) VALUES(%s,%s,%s,%s,%s,%s,%s)",(ACADEMY_ID,item.strip(),cat,qty,condition,note.strip() or None,user['id']));st.rerun()
         c1,c2=st.columns(2);status=c1.selectbox("Филтър по състояние",["Всички","new","good","worn","damaged","retired"]);stock_filter=c2.selectbox("Филтър по наличност",["Всички","Има наличност","Изчерпани"])
         inv=fetchall("SELECT * FROM club_inventory WHERE academy_id=%s AND active ORDER BY category,item_name",(ACADEMY_ID,))
-        for x in inv:
-            if status!="Всички" and x['condition_status']!=status:continue
-            if stock_filter=="Има наличност" and x['quantity']<=0:continue
-            if stock_filter=="Изчерпани" and x['quantity']!=0:continue
+        filtered_inv=[]
+        for row in inv:
+            if status!="Всички" and row['condition_status']!=status:continue
+            if stock_filter=="Има наличност" and row['quantity']<=0:continue
+            if stock_filter=="Изчерпани" and row['quantity']!=0:continue
+            filtered_inv.append(row)
+        st.download_button(
+            f"📥 Excel: актуален клубен асортимент ({len(filtered_inv)})",
+            club_inventory_excel(filtered_inv),
+            "academy_club_assortment_current_status.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            key="download_club_inventory_current_status",
+        )
+        for x in filtered_inv:
             with st.container(border=True):
                 a,b=st.columns([4,1]);a.write(f"**{x['item_name']}** · {x['category']} · {x['condition_status']}");q=b.number_input("Бройки",0,100000,int(x['quantity']),key=f"club_qty_{x['id']}")
                 if st.button("Запази клубната наличност",key=f"save_club_{x['id']}"):execute("UPDATE club_inventory SET quantity=%s,updated_at=NOW() WHERE id=%s AND academy_id=%s",(q,x['id'],ACADEMY_ID));st.rerun()
 
+
+def coach_inventory_status_panel(user):
+    st.subheader("📦 Клубен асортимент")
+    st.caption("Треньорски достъп: виждаш текущия асортимент, състоянието и бройките. Създаване на нови артикули остава само за Admin.")
+    c1,c2=st.columns(2)
+    status=c1.selectbox("Филтър по състояние",["Всички","new","good","worn","damaged","retired"],format_func=lambda x:{"Всички":"Всички","new":"Ново","good":"Добро","worn":"Амортизирано","damaged":"Повредено","retired":"Бракувано"}.get(x,x),key="coach_inventory_condition")
+    stock_filter=c2.selectbox("Филтър по наличност",["Всички","Има наличност","Изчерпани"],key="coach_inventory_stock")
+    rows=fetchall("SELECT * FROM club_inventory WHERE academy_id=%s AND active ORDER BY category,item_name",(ACADEMY_ID,))
+    shown=0
+    labels={"new":"Ново","good":"Добро","worn":"Амортизирано","damaged":"Повредено","retired":"Бракувано"}
+    for row in rows:
+        if status!="Всички" and row['condition_status']!=status:continue
+        if stock_filter=="Има наличност" and row['quantity']<=0:continue
+        if stock_filter=="Изчерпани" and row['quantity']!=0:continue
+        shown+=1
+        with st.container(border=True):
+            info_col,qty_col=st.columns([4,1])
+            info_col.write(f"**{row['item_name']}** · {row['category']}")
+            info_col.caption(f"Състояние: {labels.get(row['condition_status'],row['condition_status'])}")
+            new_qty=qty_col.number_input("Бройки",0,100000,int(row['quantity']),key=f"coach_club_qty_{row['id']}")
+            if row.get('note'):st.caption(f"Бележка: {row['note']}")
+            if st.button("💾 Запази бройките",key=f"coach_save_club_{row['id']}",use_container_width=True):
+                execute("UPDATE club_inventory SET quantity=%s,updated_at=NOW() WHERE id=%s AND academy_id=%s",(new_qty,row['id'],ACADEMY_ID))
+                set_flash(f"✅ Наличността за {row['item_name']} е обновена.")
+                st.rerun()
+    if not shown:st.info("Няма артикули за избраните филтри.")
 
 def admin_training_resources(user):
     st.subheader("🎓 Управление тренировки")
@@ -3661,7 +3733,7 @@ def coach_panel(user):
     elif sec == "Такси":
         payment_panel(user,[t["id"] for t in teams],fixed_team_id=team["id"])
     elif sec == "🛍️ Екипировка / Аксесоари":
-        product_catalog_parent(user,None)
+        coach_inventory_status_panel(user)
     elif sec == "Съобщения":
         with st.form("coach_message_form"):
             title = st.text_input("Заглавие"); body = st.text_area("Съобщение към родителите"); send = st.form_submit_button("Изпрати към групата", use_container_width=True)
