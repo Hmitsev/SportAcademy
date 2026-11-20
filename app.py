@@ -1253,6 +1253,20 @@ def notification_center(user):
             st.caption(row["created_at"].strftime("%d.%m.%Y %H:%M"))
 
 
+def compact_notification_bell(user,key_prefix="notifications"):
+    unread=unread_notification_count(user["id"])
+    label=f"🔔 {unread}" if unread else "🔔"
+    with st.popover(label,use_container_width=True):
+        st.markdown("### Известия")
+        rows=fetchall("SELECT * FROM notifications WHERE academy_id=%s AND user_id=%s AND NOT is_read ORDER BY created_at DESC LIMIT 50",(ACADEMY_ID,user["id"]))
+        if not rows:st.caption("Няма нови известия.")
+        else:
+            if st.button("✅ Маркирай всички като прочетени",key=f"{key_prefix}_read_all_{user['id']}",use_container_width=True):
+                execute("DELETE FROM notifications WHERE academy_id=%s AND user_id=%s",(ACADEMY_ID,user["id"]));st.rerun()
+            for row in rows:
+                st.write(f"**{row['title']}**")
+                if row.get("body"):st.caption(row["body"])
+
 def notify_team_parents(team_id, notification_type, title, body=""):
     parents = fetchall(
         """SELECT DISTINCT u.id AS user_id
@@ -3785,10 +3799,9 @@ def coach_panel(user):
     coach = fetchone("SELECT * FROM coaches WHERE academy_id=%s AND user_id=%s AND active", (ACADEMY_ID, user["id"]))
     st.title("Треньорски панел")
     show_flash()
-    coach_unread = unread_notification_count(user["id"])
-    if coach_unread > 0:
-        with st.expander(f"🔔 {coach_unread} нови известия", expanded=False):
-            notification_center(user)
+    bell_space,bell_col=st.columns([12,1])
+    with bell_col:
+        compact_notification_bell(user,"coach")
     if not coach:
         st.warning("Този Coach профил още не е свързан с треньор. Admin трябва да го свърже от „Треньори и набори“.")
         return
@@ -3908,6 +3921,8 @@ def coach_panel(user):
                         set_flash("⚠️ Групата е запазена, но няма активни одобрени родители за уведомяване.","warning")
                     st.rerun()
                 render_match_poll_responses(match)
+    elif sec == "Упражнения":
+        coach_exercises_panel()
     elif sec == "Присъствие":
         events = fetchall("SELECT * FROM events WHERE academy_id=%s AND team_id=%s ORDER BY starts_at DESC LIMIT 40", (ACADEMY_ID, team["id"]))
         if not events: st.info("Първо създай тренировка или мач.")
@@ -3975,7 +3990,7 @@ def coach_panel(user):
                 st.caption(f"За: {row.get('player_first') or ''} {row.get('player_last') or ''} · {row['created_at']:%d.%m.%Y %H:%M}")
         execute("UPDATE feedback SET is_read=TRUE WHERE academy_id=%s AND coach_user_id=%s", (ACADEMY_ID,user["id"]))
     else:
-        notification_center(user)
+        st.info("Избери секция от треньорското меню.")
 
 def logout_button():
     if st.sidebar.button("Изход",use_container_width=True):
