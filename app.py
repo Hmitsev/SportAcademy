@@ -2019,7 +2019,18 @@ def register_parent():
     with st.form("register_parent_form"):
         c1,c2=st.columns(2); first=c1.text_input("Име"); last=c2.text_input("Фамилия")
         email=c1.text_input("Имейл").strip().lower(); phone=c2.text_input("Телефон")
-        pw=c1.text_input("Парола",type="password"); pw2=c2.text_input("Повтори паролата",type="password")
+        pw = c1.text_input(
+            "Парола",
+            type="password",
+            help="Паролата трябва да съдържа минимум 8 символа."
+        )
+        
+        pw2 = c2.text_input(
+            "Повтори паролата",
+            type="password"
+        )
+        
+        st.caption("🔐 Паролата трябва да съдържа минимум 8 символа.")
         children=[]
         for i in range(int(child_count)):
             st.markdown(f"**Дете {i+1}**")
