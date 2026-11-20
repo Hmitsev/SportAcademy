@@ -3015,7 +3015,7 @@ def specialist_panel(user):
     teams=specialist_teams(user["id"])
     st.sidebar.markdown(avatar_html(profile.get("profile_image"),profile.get("profile_image_mime"),72),unsafe_allow_html=True)
     st.sidebar.caption(f"{profile['display_name']} · {specialist_role_label(profile['specialist_type'])}")
-    sections=["Табло","Тренировки","Мачове","🏆 Резултати","🛍️ Екипировка / Аксесоари","Съобщения","Информация","Статистика"]
+    sections=["Табло","Тренировки","Мачове","Съобщения","Информация","Статистика","🏆 Резултати","🛍️ Екипировка / Аксесоари"]
     sec=st.sidebar.radio("Меню",sections,key="specialist_menu")
     if not teams:st.info("Все още няма зачислени набори към този профил.");return
     tmap={t["name"]:t for t in teams};team=tmap[st.selectbox("Набор",list(tmap),key="specialist_team")]
@@ -3176,7 +3176,7 @@ def admin_panel(user):
     if count > 0:
         with st.expander(f"🔔 {count} нови известия", expanded=False):
             notification_center(user)
-    sections = ["ТАБЛО", "РЕГИСТРАЦИЯ", "ДЕЦА И ГРУПИ", "ДЮЛГЕРОВ", "НАСТРОЙКИ ЗА ПРОФИЛИТЕ", "ФИНАНСИ", "ИНФОРМАЦИЯ"]
+    sections = ["ТАБЛО", "РЕГИСТРАЦИЯ", "ДЕЦА И ГРУПИ", "НАСТРОЙКИ ЗА ПРОФИЛИТЕ", "ФИНАНСИ", "ИНФОРМАЦИЯ", "ДЮЛГЕРОВ"]
     sec = st.sidebar.radio("Админ меню", sections)
     profile_settings_page = None
     if sec == "НАСТРОЙКИ ЗА ПРОФИЛИТЕ":
@@ -3599,7 +3599,7 @@ def coach_panel(user):
         return
     st.sidebar.markdown(avatar_html(coach.get("profile_image"),coach.get("profile_image_mime"),72),unsafe_allow_html=True)
     st.sidebar.caption(coach["display_name"])
-    sections = ["Табло", "Тренировки и мачове", "Упражнения", "Присъствие", "Такси", "🛍️ Екипировка / Аксесоари", "Съобщения", "Обратна връзка"]
+    sections = ["Табло", "Тренировки и мачове", "Упражнения", "Присъствие", "Такси", "Съобщения", "Обратна връзка", "🏆 Резултати", "🛍️ Екипировка / Аксесоари", "📦 Инвентар"]
     sec = st.sidebar.radio("Треньорско меню", sections)
     tmap = {t["name"]: t for t in teams}
     team_name = st.selectbox("Набор", list(tmap), key="coach_selected_team")
@@ -3732,7 +3732,11 @@ def coach_panel(user):
                 set_flash("✅ Присъствието е запазено успешно."); st.rerun()
     elif sec == "Такси":
         payment_panel(user,[t["id"] for t in teams],fixed_team_id=team["id"])
+    elif sec == "🏆 Резултати":
+        results_statistics_panel(team)
     elif sec == "🛍️ Екипировка / Аксесоари":
+        product_catalog_parent(user,None)
+    elif sec == "📦 Инвентар":
         coach_inventory_status_panel(user)
     elif sec == "Съобщения":
         with st.form("coach_message_form"):
