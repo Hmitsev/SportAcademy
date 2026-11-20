@@ -1835,9 +1835,9 @@ def login():
             st.rerun()
 
 def parent_lions_banner():
-    lion_path = APP_DIR / "Designer (7).png"
+    lion_path = APP_DIR / "Designer (7).jpg"
     if not lion_path.exists():
-        st.warning("Липсва файлът Designer (7).png в основната папка на проекта.")
+        st.warning("Липсва файлът Designer (7).jpg в основната папка на проекта.")
         return
     # PNG се зарежда при runtime. Така app.py остава малък и GitHub го показва нормално.
     lion_src = "data:image/png;base64," + base64.b64encode(lion_path.read_bytes()).decode("ascii")
