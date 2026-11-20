@@ -1139,6 +1139,11 @@ def apply_style():
             margin-top: 18px !important;
         }}
         @media (max-width: 768px) {{
+            /* Компактно меню за родителския профил на телефон */
+            .st-key-parent_nav {{margin-top:22px !important;max-width:100% !important;}}
+            .st-key-parent_nav div[data-testid="stHorizontalBlock"] {{display:flex !important;flex-direction:row !important;flex-wrap:nowrap !important;gap:7px !important;margin-bottom:7px !important;}}
+            .st-key-parent_nav div[data-testid="stColumn"] {{flex:1 1 50% !important;width:50% !important;min-width:0 !important;}}
+            .st-key-parent_nav div[data-testid="stButton"] > button {{width:100% !important;min-height:42px !important;height:42px !important;padding:4px 7px !important;border-radius:11px !important;font-size:.72rem !important;font-weight:800 !important;line-height:1.08 !important;white-space:normal !important;box-shadow:0 5px 12px rgba(0,0,0,.24) !important;}}
             .block-container {{
                 padding: 0.8rem 0.7rem 3rem;
             }}
@@ -1881,9 +1886,9 @@ def parent_nav():
     items=[("🏠 Начало","Начало"),("📅 Тренировки","Тренировки"),("⚽ Мачове","Мачове"),("💬 Съобщение от треньор","Съобщения"),("💰 Такси и Поръчки","Такси"),("ℹ️ Информация","Информация"),("📝 Обратна връзка","Обратна връзка"),("🗣️ ФЕН ЧАТ","ФЕН ЧАТ"),("👤 Настройки","Настройки")]
     st.session_state.setdefault("parent_page","Начало")
     with st.container(key="parent_nav"):
-        for start in range(0,len(items),3):
-            cols=st.columns(3,gap="small")
-            for col,(label,page) in zip(cols,items[start:start+3]):
+        for start in range(0,len(items),2):
+            cols=st.columns(2,gap="small")
+            for col,(label,page) in zip(cols,items[start:start+2]):
                 if col.button(label,key=f"pnav_{page}",use_container_width=True,type="primary" if st.session_state.parent_page==page else "secondary"):
                     st.session_state.parent_page=page; st.rerun()
 
