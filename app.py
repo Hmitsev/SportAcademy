@@ -1664,18 +1664,80 @@ def product_catalog_parent(user,child=None):
                 else: st.caption("Плащането с карта предстои да бъде активирано.")
                 note=st.text_input("Бележка към заявката",key=f"shop_note_{user['id']}_{item['id']}")
                 disabled=method=='card'
-                st.button(
-                    "🔒 Изпрати заявка · предстои",
-                    key=f"shop_order_{user['id']}_{item['id']}",
-                    use_container_width=True,
-                    disabled=True,
-                    help="Предварителните заявки предстои да бъдат активирани."
-                )
+                if user.get("role") == "admin":
+                    if st.button(
+                        "📝 Изпрати предварителна заявка",
+                        key=f"shop_order_{user['id']}_{item['id']}",
+                        use_container_width=True,
+                        type="primary",
+                        disabled=disabled
+                    ):
+                        requester = f"{user['first_name']} {user['last_name']}"
+                        player_id = child['id'] if child else None
+                        parent_id = user['id'] if user.get('role') == 'parent' else None
                 
-                st.caption(
-                    "🔒 Функцията за изпращане на предварителна заявка "
-                    "предстои да бъде активирана."
-                )
+                        execute(
+                            """INSERT INTO shop_orders(
+                                academy_id,
+                                product_id,
+                                variant_id,
+                                parent_user_id,
+                                player_id,
+                                requester_user_id,
+                                requester_name,
+                                quantity,
+                                unit_price,
+                                selected_size,
+                                payment_method,
+                                payment_status,
+                                fulfilment_status,
+                                parent_note
+                            )
+                            VALUES(
+                                %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                                'pending','new',%s
+                            )""",
+                            (
+                                ACADEMY_ID,
+                                item['id'],
+                                variant['id'],
+                                parent_id,
+                                player_id,
+                                user['id'],
+                                requester,
+                                qty,
+                                item['price'],
+                                f"{variant['model_name']} / {variant['size_name']}",
+                                method,
+                                note.strip() or None
+                            )
+                        )
+                
+                        notify_admins(
+                            'shop_preorder',
+                            'Нова предварителна заявка',
+                            f"{requester} · {item['name']} · {qty} бр."
+                        )
+                
+                        set_flash(
+                            "✅ Предварителната заявка е изпратена. "
+                            "Ще получите известие при промяна на статуса."
+                        )
+                        st.rerun()
+                
+                else:
+                    st.button(
+                        "🔒 Изпрати заявка · предстои",
+                        key=f"shop_locked_{user['id']}_{item['id']}",
+                        use_container_width=True,
+                        disabled=True,
+                        help="Предварителните заявки предстои да бъдат активирани."
+                    )
+                
+                    st.caption(
+                        "🔒 Функцията за изпращане на предварителна заявка "
+                        "предстои да бъде активирана."
+                    )
     if not visible_count: st.info("В момента няма публикувани артикули.")
     st.divider();st.subheader("Моите заявки")
     mine=fetchall("""SELECT o.*,p.name product_name FROM shop_orders o JOIN shop_products p ON p.id=o.product_id WHERE o.academy_id=%s AND (o.requester_user_id=%s OR o.parent_user_id=%s) ORDER BY o.created_at DESC""",(ACADEMY_ID,user['id'],user['id']))
