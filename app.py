@@ -2109,14 +2109,19 @@ def register_parent():
     for i in range(int(child_count)):
         st.markdown(f"### Дете {i+1}");a,b,c=st.columns(3)
         cf=a.text_input("Име",key=f"cf{i}");cl=b.text_input("Фамилия",key=f"cl{i}");bd=c.date_input("Дата на раждане",date(2018,1,1),key=f"cb{i}")
-        source=st.radio("Добавяне на задължителна профилна снимка",["📁 Избери файл","📷 Направи снимка сега"],horizontal=True,key=f"child_photo_source_{i}")
-        photo=st.camera_input("📷 Камера",key=f"child_camera_{i}") if source.startswith("📷") else st.file_uploader("📁 Снимка",type=["jpg","jpeg","png","webp"],key=f"child_upload_{i}")
+        photo=st.file_uploader(
+            "📷 Задължителна профилна снимка",
+            type=["jpg","jpeg","png","webp"],
+            key=f"child_upload_{i}",
+            help="На телефон бутонът позволява да снимате с камерата или да изберете готова снимка.",
+        )
         image_bytes=image_mime=None
         if photo:
-            st.caption("Преди потвърждение нагласете фокуса. Лицето трябва да е в центъра на кръга.")
-            f1,f2,f3=st.columns(3);focus_x=f1.slider("Хоризонтален фокус",0,100,50,key=f"focus_x_{i}");focus_y=f2.slider("Вертикален фокус",0,100,50,key=f"focus_y_{i}");zoom=f3.slider("Приближаване",1.0,3.0,1.25,0.05,key=f"focus_zoom_{i}")
-            image_bytes,image_mime=prepare_profile_photo(photo,focus_x,focus_y,zoom)
-            if image_bytes:circular_preview(image_bytes);st.success("✅ Това е профилната снимка, която ще бъде запазена.")
+            image_bytes,image_mime=prepare_profile_photo(photo,50,50,1.0)
+            if image_bytes:
+                circular_preview(image_bytes,220)
+                st.caption("Кръглият преглед показва как ще изглежда профилната снимка. За различен кадър натиснете отново бутона за снимка и изберете/заснемете нова.")
+                st.success("✅ Профилната снимка е готова.")
         else:st.warning("Снимката на детето е задължителна за завършване на регистрацията.")
         children.append((cf,cl,bd,image_bytes,image_mime))
     submit=st.button("Изпрати регистрация",use_container_width=True,type="primary",key="submit_parent_registration")
@@ -2765,7 +2770,7 @@ def parent_panel(user):
             for r in rows:
                 with st.container(border=True):
                     st.markdown(
-                        f"<div class='schedule-line' style='color:#ff2020!important;font-weight:900!important;font-size:1.12rem!important;text-shadow:0 0 2px #000,0 0 8px rgba(255,0,0,.50);'>⚽ {r['title']} · срещу {r.get('opponent') or 'Непосочен противник'} · {r['starts_at']:%d.%m.%Y %H:%M} · {r.get('location') or 'Без място'}</div>",
+                        f"<div class='schedule-line' style='color:#ff2020!important;font-weight:900!important;font-size:1.12rem!important;text-shadow:0 0 2px #000,0 0 8px rgba(255,0,0,.50);'>📅 {r['starts_at']:%d.%m.%Y} · 🕒 {r['starts_at']:%H:%M}</div>",
                         unsafe_allow_html=True,
                     )
                     if r.get("description"): st.info(f"ℹ️ {r['description']}")
