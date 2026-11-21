@@ -580,6 +580,20 @@ def init_db():
           coach_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
           admin_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL, subject TEXT NOT NULL, body TEXT NOT NULL,
           is_read BOOLEAN NOT NULL DEFAULT FALSE, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""",
+      """CREATE TABLE IF NOT EXISTS staff_direct_messages(
+          id BIGSERIAL PRIMARY KEY, academy_id BIGINT NOT NULL REFERENCES academies(id) ON DELETE CASCADE,
+          sender_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL, subject TEXT NOT NULL, body TEXT NOT NULL,
+          file_name TEXT, file_mime TEXT, file_data BYTEA, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""",
+      """CREATE TABLE IF NOT EXISTS staff_direct_message_recipients(
+          message_id BIGINT NOT NULL REFERENCES staff_direct_messages(id) ON DELETE CASCADE,
+          recipient_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE, is_read BOOLEAN NOT NULL DEFAULT FALSE,
+          PRIMARY KEY(message_id,recipient_user_id))""",
+      """CREATE INDEX IF NOT EXISTS idx_staff_direct_recipient ON staff_direct_message_recipients(recipient_user_id,is_read,message_id)""",
+      """CREATE TABLE IF NOT EXISTS staff_chat_messages(
+          id BIGSERIAL PRIMARY KEY, academy_id BIGINT NOT NULL REFERENCES academies(id) ON DELETE CASCADE,
+          sender_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL, body TEXT,
+          file_name TEXT, file_mime TEXT, file_data BYTEA, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""",
+      """CREATE INDEX IF NOT EXISTS idx_staff_chat_created ON staff_chat_messages(academy_id,created_at DESC)""",
     ]
     with db() as conn, conn.cursor() as cur:
         for sql in statements: cur.execute(sql)
@@ -1339,14 +1353,14 @@ def parent_information(user=None):
 
 
 def fan_chat(user, team_id):
-    # Поетапно пазим само последните 5 дни. Изтриването се изпълнява при всяко отваряне/изпращане в чата.
+    # Поетапно пазим само последните 10 дни. Изтриването се изпълнява при всяко отваряне/изпращане в чата.
     execute(
-        "DELETE FROM fan_chat_messages WHERE academy_id=%s AND team_id=%s AND created_at < NOW() - INTERVAL '5 days'",
+        "DELETE FROM fan_chat_messages WHERE academy_id=%s AND team_id=%s AND created_at < NOW() - INTERVAL '10 days'",
         (ACADEMY_ID, team_id),
     )
 
     st.subheader("🗣️ ФЕН ЧАТ")
-    st.caption("Чатът е само за родителите в същия набор. Съобщенията се пазят 5 дни.")
+    st.caption("Чатът е само за родителите в същия набор. Съобщенията се пазят 10 дни.")
 
     media_enabled = st.checkbox(
         "📷 Разреши снимка към това съобщение",
@@ -1387,12 +1401,12 @@ def fan_chat(user, team_id):
         """SELECT f.*,u.first_name,u.last_name FROM fan_chat_messages f
            JOIN users u ON u.id=f.sender_user_id
            WHERE f.academy_id=%s AND f.team_id=%s
-             AND f.created_at >= NOW() - INTERVAL '5 days'
+             AND f.created_at >= NOW() - INTERVAL '10 days'
            ORDER BY f.created_at DESC LIMIT 100""",
         (ACADEMY_ID, team_id),
     )
     if not rows:
-        st.info("Няма съобщения във ФЕН ЧАТ от последните 5 дни.")
+        st.info("Няма съобщения във ФЕН ЧАТ от последните 10 дни.")
     for row in rows:
         with st.container(border=True):
             st.write(f"**{row['first_name']} {row['last_name']}**")
@@ -2013,42 +2027,111 @@ def coach_exercises_panel():
                 if r['resource_type']=='video':st.video(r['url'])
                 else:st.link_button("🔗 Отвори материала",r['url'])
 
+def prepare_profile_photo(uploaded_file, focus_x=50, focus_y=50, zoom=1.0):
+    """Create a square, face-focused JPEG using parent-selected focus and zoom."""
+    if not uploaded_file:return None,None
+    raw=uploaded_file.getvalue()
+    if len(raw)>8*1024*1024:
+        st.error("Снимката е прекалено голяма. Максимум 8 MB.");return None,None
+    try:
+        image=Image.open(io.BytesIO(raw));image.load();image=ImageOps.exif_transpose(image).convert("RGB")
+        w,h=image.size;zoom=max(1.0,min(float(zoom),3.0));side=max(1,int(min(w,h)/zoom))
+        cx=int((max(0,w-side))*max(0,min(100,int(focus_x)))/100)
+        cy=int((max(0,h-side))*max(0,min(100,int(focus_y)))/100)
+        image=image.crop((cx,cy,cx+side,cy+side)).resize((600,600),Image.Resampling.LANCZOS)
+        out=io.BytesIO();image.save(out,format="JPEG",quality=78,optimize=True,progressive=True)
+        return out.getvalue(),"image/jpeg"
+    except Exception:
+        st.error("Файлът не може да бъде обработен като валидна снимка.");return None,None
+def circular_preview(image_bytes,size=190):
+    if not image_bytes:return
+    image=Image.open(io.BytesIO(image_bytes)).convert("RGB").resize((size,size),Image.Resampling.LANCZOS)
+    mask=Image.new("L",(size,size),0);ImageDraw.Draw(mask).ellipse((0,0,size-1,size-1),fill=255)
+    preview=Image.new("RGBA",(size,size),(0,0,0,0));preview.paste(image,(0,0),mask)
+    st.image(preview,width=size)
+def staff_people(current_user_id):
+    return fetchall("""SELECT id,first_name,last_name,role FROM users WHERE academy_id=%s AND active AND account_status='approved' AND role IN ('admin','coach','specialist') AND id<>%s ORDER BY role,first_name,last_name""",(ACADEMY_ID,current_user_id))
+def staff_direct_messages_panel(user):
+    st.subheader("✉️ Лични съобщения")
+    people=staff_people(user["id"]);labels={f"{x['first_name']} {x['last_name']} · {specialist_role_label('conditioning') if x['role']=='specialist' else {'admin':'Admin','coach':'Треньор'}.get(x['role'],x['role'])}":x for x in people}
+    with st.form(f"staff_direct_form_{user['id']}",clear_on_submit=True):
+        selected=st.multiselect("Получатели",list(labels),help="Може да изберете един или повече души.")
+        subject=st.text_input("Тема");body=st.text_area("Съобщение")
+        attachment=st.file_uploader("📎 Файл или снимка",key=f"staff_direct_file_{user['id']}")
+        send=st.form_submit_button("Изпрати съобщението",use_container_width=True,type="primary")
+    if send:
+        if not selected or not subject.strip() or not body.strip():st.error("Изберете поне един получател и попълнете тема и съобщение.")
+        elif attachment and len(attachment.getvalue())>8*1024*1024:st.error("Файлът е прекалено голям. Максимум 8 MB.")
+        else:
+            msg=execute("""INSERT INTO staff_direct_messages(academy_id,sender_user_id,subject,body,file_name,file_mime,file_data) VALUES(%s,%s,%s,%s,%s,%s,%s) RETURNING id""",(ACADEMY_ID,user['id'],subject.strip(),body.strip(),attachment.name if attachment else None,attachment.type if attachment else None,attachment.getvalue() if attachment else None),True)
+            for label in selected:
+                recipient=labels[label];execute("INSERT INTO staff_direct_message_recipients(message_id,recipient_user_id) VALUES(%s,%s)",(msg['id'],recipient['id']));create_notification(recipient['id'],'staff_message',f"Ново съобщение: {subject.strip()}",f"От {user['first_name']} {user['last_name']}")
+            set_flash(f"✅ Съобщението е изпратено до {len(selected)} получатели.");st.rerun()
+    rows=fetchall("""SELECT m.*,s.first_name,s.last_name,r.is_read FROM staff_direct_message_recipients r JOIN staff_direct_messages m ON m.id=r.message_id LEFT JOIN users s ON s.id=m.sender_user_id WHERE m.academy_id=%s AND r.recipient_user_id=%s ORDER BY m.created_at DESC LIMIT 100""",(ACADEMY_ID,user['id']))
+    execute("UPDATE staff_direct_message_recipients SET is_read=TRUE WHERE recipient_user_id=%s",(user['id'],))
+    st.markdown("### Получени")
+    if not rows:st.info("Няма получени лични съобщения.")
+    for row in rows:
+        with st.container(border=True):
+            st.write(f"**{row['subject']}**");st.caption(f"От: {row.get('first_name') or 'Премахнат профил'} {row.get('last_name') or ''} · {row['created_at']:%d.%m.%Y %H:%M}");st.write(row['body'])
+            if row.get('file_data'):st.download_button(f"📎 {row.get('file_name') or 'Прикачен файл'}",bytes(row['file_data']),row.get('file_name') or 'attachment',row.get('file_mime') or 'application/octet-stream',key=f"direct_download_{user['id']}_{row['id']}")
+def staff_team_chat(user):
+    execute("DELETE FROM staff_chat_messages WHERE academy_id=%s AND created_at<NOW()-INTERVAL '10 days'",(ACADEMY_ID,))
+    st.subheader("💬 Екипен чат")
+    st.caption("Общ чат за Admin, треньори и кондиционен/поддържащ екип. Историята се пази 10 дни.")
+    with st.form(f"staff_chat_form_{user['id']}",clear_on_submit=True):
+        body=st.text_area("Ново съобщение",max_chars=2000);attachment=st.file_uploader("📎 Файл или снимка",key=f"staff_chat_file_{user['id']}")
+        send=st.form_submit_button("Изпрати в екипния чат",use_container_width=True,type="primary")
+    if send:
+        data=attachment.getvalue() if attachment else None
+        if not body.strip() and not data:st.error("Напишете съобщение или прикачете файл.")
+        elif data and len(data)>8*1024*1024:st.error("Файлът е прекалено голям. Максимум 8 MB.")
+        else:execute("INSERT INTO staff_chat_messages(academy_id,sender_user_id,body,file_name,file_mime,file_data) VALUES(%s,%s,%s,%s,%s,%s)",(ACADEMY_ID,user['id'],body.strip() or None,attachment.name if attachment else None,attachment.type if attachment else None,data));st.rerun()
+    rows=fetchall("""SELECT m.*,u.first_name,u.last_name,u.role FROM staff_chat_messages m LEFT JOIN users u ON u.id=m.sender_user_id WHERE m.academy_id=%s AND m.created_at>=NOW()-INTERVAL '10 days' ORDER BY m.created_at DESC LIMIT 200""",(ACADEMY_ID,))
+    if not rows:st.info("Няма съобщения от последните 10 дни.")
+    for row in rows:
+        with st.container(border=True):
+            st.write(f"**{row.get('first_name') or 'Премахнат профил'} {row.get('last_name') or ''}** · {row.get('role') or ''}")
+            if row.get('body'):st.write(row['body'])
+            if row.get('file_data'):
+                mime=(row.get('file_mime') or '').lower()
+                if mime.startswith('image/'):st.image(bytes(row['file_data']),caption=row.get('file_name'),use_container_width=True)
+                else:st.download_button(f"📎 {row.get('file_name') or 'Прикачен файл'}",bytes(row['file_data']),row.get('file_name') or 'attachment',row.get('file_mime') or 'application/octet-stream',key=f"chat_download_{user['id']}_{row['id']}")
+            st.caption(row['created_at'].strftime('%d.%m.%Y %H:%M'))
 def register_parent():
     st.subheader("Регистрация на родител")
-    child_count=st.number_input("Брой деца за добавяне сега",1,5,1)
-    with st.form("register_parent_form"):
-        c1,c2=st.columns(2); first=c1.text_input("Име"); last=c2.text_input("Фамилия")
-        email=c1.text_input("Имейл").strip().lower(); phone=c2.text_input("Телефон")
-        pw = c1.text_input(
-            "Парола",
-            type="password",
-            help="Паролата трябва да съдържа минимум 8 символа."
-        )
-        
-        pw2 = c2.text_input(
-            "Повтори паролата",
-            type="password"
-        )
-        
-        st.caption("🔐 Паролата трябва да съдържа минимум 8 символа.")
-        children=[]
-        for i in range(int(child_count)):
-            st.markdown(f"**Дете {i+1}**")
-            a,b,c=st.columns(3)
-            children.append((a.text_input("Име",key=f"cf{i}"),b.text_input("Фамилия",key=f"cl{i}"),c.date_input("Дата на раждане",date(2018,1,1),key=f"cb{i}")))
-        submit=st.form_submit_button("Изпрати регистрация",use_container_width=True)
+    child_count=st.number_input("Брой деца за добавяне сега",1,5,1,key="registration_child_count")
+    c1,c2=st.columns(2);first=c1.text_input("Име",key="reg_first");last=c2.text_input("Фамилия",key="reg_last")
+    email=c1.text_input("Имейл",key="reg_email").strip().lower();phone=c2.text_input("Телефон",key="reg_phone")
+    pw=c1.text_input("Парола",type="password",help="Минимум 8 символа.",key="reg_pw");pw2=c2.text_input("Повтори паролата",type="password",key="reg_pw2")
+    st.caption("🔐 Паролата трябва да съдържа минимум 8 символа.")
+    children=[]
+    for i in range(int(child_count)):
+        st.markdown(f"### Дете {i+1}");a,b,c=st.columns(3)
+        cf=a.text_input("Име",key=f"cf{i}");cl=b.text_input("Фамилия",key=f"cl{i}");bd=c.date_input("Дата на раждане",date(2018,1,1),key=f"cb{i}")
+        source=st.radio("Добавяне на задължителна профилна снимка",["📁 Избери файл","📷 Направи снимка сега"],horizontal=True,key=f"child_photo_source_{i}")
+        photo=st.camera_input("📷 Камера",key=f"child_camera_{i}") if source.startswith("📷") else st.file_uploader("📁 Снимка",type=["jpg","jpeg","png","webp"],key=f"child_upload_{i}")
+        image_bytes=image_mime=None
+        if photo:
+            st.caption("Преди потвърждение нагласете фокуса. Лицето трябва да е в центъра на кръга.")
+            f1,f2,f3=st.columns(3);focus_x=f1.slider("Хоризонтален фокус",0,100,50,key=f"focus_x_{i}");focus_y=f2.slider("Вертикален фокус",0,100,50,key=f"focus_y_{i}");zoom=f3.slider("Приближаване",1.0,3.0,1.25,0.05,key=f"focus_zoom_{i}")
+            image_bytes,image_mime=prepare_profile_photo(photo,focus_x,focus_y,zoom)
+            if image_bytes:circular_preview(image_bytes);st.success("✅ Това е профилната снимка, която ще бъде запазена.")
+        else:st.warning("Снимката на детето е задължителна за завършване на регистрацията.")
+        children.append((cf,cl,bd,image_bytes,image_mime))
+    submit=st.button("Изпрати регистрация",use_container_width=True,type="primary",key="submit_parent_registration")
     if submit:
-        if not all([first.strip(),last.strip(),email,pw]) or pw!=pw2 or len(pw)<8: st.error("Провери данните и паролата."); return
-        if any(not x[0].strip() or not x[1].strip() for x in children): st.error("Попълни имената на всяко дете."); return
+        if not all([first.strip(),last.strip(),email,pw]) or pw!=pw2 or len(pw)<8:st.error("Провери данните и паролата.");return
+        if any(not x[0].strip() or not x[1].strip() for x in children):st.error("Попълни имената на всяко дете.");return
+        if any(not x[3] for x in children):st.error("Добави и фокусирай задължителна снимка за всяко дете.");return
         try:
-            parent=execute("""INSERT INTO users(academy_id,first_name,last_name,email,phone,password_hash,role,account_status)
-                VALUES(%s,%s,%s,%s,%s,%s,'parent','pending') RETURNING id""",(ACADEMY_ID,first.strip(),last.strip(),email,phone.strip(),hash_password(pw)),True)
-            for cf,cl,bd in children:
-                player=execute("INSERT INTO players(academy_id,first_name,last_name,birth_date) VALUES(%s,%s,%s,%s) RETURNING id",(ACADEMY_ID,cf.strip(),cl.strip(),bd),True)
-                execute("INSERT INTO parent_players(academy_id,parent_user_id,player_id) VALUES(%s,%s,%s)",(ACADEMY_ID,parent["id"],player["id"]))
+            with db() as conn,conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""INSERT INTO users(academy_id,first_name,last_name,email,phone,password_hash,role,account_status) VALUES(%s,%s,%s,%s,%s,%s,'parent','pending') RETURNING id""",(ACADEMY_ID,first.strip(),last.strip(),email,phone.strip(),hash_password(pw)));parent=cur.fetchone()
+                for cf,cl,bd,image_bytes,image_mime in children:
+                    cur.execute("INSERT INTO players(academy_id,first_name,last_name,birth_date,profile_image,profile_image_mime) VALUES(%s,%s,%s,%s,%s,%s) RETURNING id",(ACADEMY_ID,cf.strip(),cl.strip(),bd,image_bytes,image_mime));player=cur.fetchone()
+                    cur.execute("INSERT INTO parent_players(academy_id,parent_user_id,player_id) VALUES(%s,%s,%s)",(ACADEMY_ID,parent['id'],player['id']))
             st.success("Регистрацията е изпратена. Администраторът трябва да одобри профила и да свърже децата с група.")
-        except Exception as exc: st.error("Имейлът вече е използван или данните са невалидни.")
-
+        except Exception:st.error("Имейлът вече е използван или данните са невалидни.")
 def login():
     with st.form("login_form"):
         email=st.text_input("Имейл").strip().lower(); pw=st.text_input("Парола",type="password")
@@ -2914,7 +2997,25 @@ def multi_date_event_form(form_key, teams, user_id, fixed_team_id=None, event_mo
             value="Тренировка",
             key=f"{form_key}_training_title",
         )
-        location = st.text_input("Място", key=f"{form_key}_training_location")
+        training_location_options = [
+            'Футболно игрище "Дюлгеров Академи" - База на Андонов',
+            '5. СУ „Георги Измирлиев“ - ул. „Христо Чернопеев“ № 16',
+            'Спортна зала на „Американски университет“',
+            '✍️ Друго място - въведи ръчно',
+        ]
+        selected_training_location = st.selectbox(
+            "Място",
+            training_location_options,
+            key=f"{form_key}_training_location_choice",
+        )
+        if selected_training_location == '✍️ Друго място - въведи ръчно':
+            location = st.text_input(
+                "Въведи място",
+                key=f"{form_key}_training_location_custom",
+                placeholder="Напр. друго игрище, зала или адрес",
+            )
+        else:
+            location = selected_training_location
         description = st.text_area("Допълнителна информация", key=f"{form_key}_training_description")
 
         st.markdown("### 1. Избери тренировъчните дни")
@@ -3231,7 +3332,7 @@ def specialist_panel(user):
     teams=specialist_teams(user["id"])
     st.sidebar.markdown(avatar_html(profile.get("profile_image"),profile.get("profile_image_mime"),72),unsafe_allow_html=True)
     st.sidebar.caption(f"{profile['display_name']} · {specialist_role_label(profile['specialist_type'])}")
-    sections=["Табло","Тренировки","Мачове","Съобщения","Информация","Статистика","🏆 Резултати","🛍️ Екипировка / Аксесоари"]
+    sections=["Табло","Тренировки","Мачове","Съобщения","Информация","Статистика","🏆 Резултати","🛍️ Екипировка / Аксесоари","💬 Екипен чат"]
     sec=st.sidebar.radio("Меню",sections,key="specialist_menu")
     if not teams:st.info("Все още няма зачислени набори към този профил.");return
     tmap={t["name"]:t for t in teams};team=tmap[st.selectbox("Набор",list(tmap),key="specialist_team")]
@@ -3396,7 +3497,7 @@ def admin_panel(user):
     if count > 0:
         with st.expander(f"🔔 {count} нови известия", expanded=False):
             notification_center(user)
-    sections = ["ТАБЛО", "РЕГИСТРАЦИЯ", "ДЕЦА И ГРУПИ", "НАСТРОЙКИ ЗА ПРОФИЛИТЕ", "ФИНАНСИ", "ИНФОРМАЦИЯ", "ДЮЛГЕРОВ"]
+    sections = ["ТАБЛО", "РЕГИСТРАЦИЯ", "ДЕЦА И ГРУПИ", "НАСТРОЙКИ ЗА ПРОФИЛИТЕ", "ФИНАНСИ", "ИНФОРМАЦИЯ", "ДЮЛГЕРОВ", "СЪОБЩЕНИЯ", "💬 Екипен чат"]
     sec = st.sidebar.radio("Админ меню", sections)
     profile_settings_page = None
     if sec == "НАСТРОЙКИ ЗА ПРОФИЛИТЕ":
@@ -3706,6 +3807,10 @@ def admin_panel(user):
 
     elif sec == "ДЮЛГЕРОВ":
         admin_dyulgerov_panel(user)
+    elif sec == "СЪОБЩЕНИЯ":
+        staff_direct_messages_panel(user)
+    elif sec == "💬 Екипен чат":
+        staff_team_chat(user)
     elif sec == "НАСТРОЙКИ ЗА ПРОФИЛИТЕ" and profile_settings_page == "Управление тренировки":
         admin_training_resources(user)
     elif sec == "НАСТРОЙКИ ЗА ПРОФИЛИТЕ" and profile_settings_page == "Кондиционен екип":
@@ -3823,7 +3928,7 @@ def coach_panel(user):
         return
     st.sidebar.markdown(avatar_html(coach.get("profile_image"),coach.get("profile_image_mime"),72),unsafe_allow_html=True)
     st.sidebar.caption(coach["display_name"])
-    sections = ["Табло", "Тренировки и мачове", "Упражнения", "Присъствие", "Такси", "Съобщения", "Обратна връзка", "🏆 Резултати", "🛍️ Екипировка / Аксесоари", "📦 Инвентар"]
+    sections = ["Табло", "Тренировки и мачове", "Упражнения", "Присъствие", "Такси", "Съобщения", "Обратна връзка", "🏆 Резултати", "🛍️ Екипировка / Аксесоари", "📦 Инвентар", "💬 Екипен чат"]
     sec = st.sidebar.radio("Треньорско меню", sections)
     tmap = {t["name"]: t for t in teams}
     team_name = st.selectbox("Набор", list(tmap), key="coach_selected_team")
@@ -3960,7 +4065,12 @@ def coach_panel(user):
         product_catalog_parent(user,None)
     elif sec == "📦 Инвентар":
         coach_inventory_status_panel(user)
+    elif sec == "💬 Екипен чат":
+        staff_team_chat(user)
     elif sec == "Съобщения":
+        staff_direct_messages_panel(user)
+        st.divider()
+        st.subheader("📢 Съобщение към родители")
         with st.form("coach_message_form"):
             title = st.text_input("Заглавие"); body = st.text_area("Съобщение към родителите"); send = st.form_submit_button("Изпрати към групата", use_container_width=True)
         if send and title.strip() and body.strip():
