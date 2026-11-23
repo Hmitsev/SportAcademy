@@ -2,3 +2,6 @@ streamlit>=1.40,<2
 psycopg2-binary>=2.9.9
 pandas
 openpyxl
+# Add these lines to the existing requirements.txt
+git+https://github.com/mpeschina/WebPushNotifications.git
+pywebpush==2.5.0
