@@ -647,6 +647,30 @@ except (psycopg2.OperationalError, psycopg2.InterfaceError):
         st.rerun()
 
     st.stop()
+# --- ONE-TIME NOTIFICATION CLEAN START ---------------------------------------
+# Clears only old in-app bell notifications once before parent rollout.
+# Push subscriptions, messages, chats, schedules and all future notifications stay intact.
+NOTIFICATION_CLEAN_START_KEY = "notification_clean_start_parent_rollout_2026_11_23_v1"
+
+def run_one_time_notification_clean_start():
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("""CREATE TABLE IF NOT EXISTS app_migrations(
+            migration_key TEXT PRIMARY KEY,
+            applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )""")
+        cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (NOTIFICATION_CLEAN_START_KEY,))
+        cur.execute("SELECT 1 FROM app_migrations WHERE migration_key=%s", (NOTIFICATION_CLEAN_START_KEY,))
+        if cur.fetchone():
+            return False
+        cur.execute("DELETE FROM notifications WHERE academy_id=%s", (ACADEMY_ID,))
+        cur.execute("INSERT INTO app_migrations(migration_key) VALUES(%s)", (NOTIFICATION_CLEAN_START_KEY,))
+        return True
+
+try:
+    _retry_db_call(run_one_time_notification_clean_start, attempts=3)
+except (psycopg2.OperationalError, psycopg2.InterfaceError):
+    pass
+
 # --- ONE-TIME MATCH TEST DATA RESET -----------------------------------------
 # Deletes only match-related test data that existed before the cutoff below.
 # The migration marker makes this safe to keep in the code: it runs once only.
@@ -2205,6 +2229,69 @@ def staff_team_chat(user):
                 if mime.startswith('image/'):st.image(bytes(row['file_data']),caption=row.get('file_name'),use_container_width=True)
                 else:st.download_button(f"📎 {row.get('file_name') or 'Прикачен файл'}",bytes(row['file_data']),row.get('file_name') or 'attachment',row.get('file_mime') or 'application/octet-stream',key=f"chat_download_{user['id']}_{row['id']}")
             st.caption(row['created_at'].strftime('%d.%m.%Y %H:%M'))
+PROFILE_CROP_COMPONENT = st.components.v2.component(
+    "dyulgerov_profile_crop_v1",
+    html="""
+    <div class="crop-app">
+      <div class="crop-stage" id="stage"><canvas id="canvas" width="600" height="600"></canvas><div class="crop-ring"></div></div>
+      <div class="crop-help">Плъзнете снимката в кръга. Увеличавайте с два пръста или с колелцето на мишката.</div>
+      <div class="crop-actions"><button type="button" id="reset">↺ Центрирай</button><button type="button" id="save">✓ Използвай този кадър</button></div>
+      <div id="status" aria-live="polite"></div>
+    </div>
+    """,
+    css="""
+    .crop-app{max-width:430px;margin:8px auto 18px;text-align:center;color:var(--st-text-color)}
+    .crop-stage{position:relative;width:min(82vw,360px);aspect-ratio:1;margin:auto;border-radius:50%;overflow:hidden;background:#111;touch-action:none;box-shadow:0 0 0 3px #c9a84c,0 12px 34px rgba(0,0,0,.42)}
+    .crop-stage canvas{width:100%;height:100%;display:block;touch-action:none;cursor:grab}.crop-stage canvas:active{cursor:grabbing}
+    .crop-ring{position:absolute;inset:0;border-radius:50%;pointer-events:none;box-shadow:inset 0 0 0 4px rgba(255,224,126,.9),inset 0 0 33px rgba(0,0,0,.3)}
+    .crop-help{font-size:.82rem;line-height:1.35;margin:12px auto 6px;max-width:360px;opacity:.85}
+    .crop-actions{display:flex;gap:8px;justify-content:center;flex-wrap:wrap}.crop-actions button{border:1px solid #d2b45f;border-radius:10px;padding:9px 12px;font-weight:750;cursor:pointer;background:#17130b;color:#f6e7b6}.crop-actions #save{background:linear-gradient(135deg,#956b20,#d1ad57);color:#fff}
+    #status{min-height:1.2em;margin-top:8px;font-size:.84rem}
+    """,
+    js="""
+    export default function(component){
+      const {parentElement,data,setStateValue,setTriggerValue}=component;
+      const canvas=parentElement.querySelector('#canvas'),ctx=canvas.getContext('2d');
+      const stage=parentElement.querySelector('#stage'),status=parentElement.querySelector('#status');
+      const image=new Image();let x=0,y=0,scale=1,minScale=1,drag=false,lastX=0,lastY=0,pinchDistance=0,pinchScale=1;
+      const clamp=()=>{const w=image.naturalWidth*scale,h=image.naturalHeight*scale;x=Math.min(0,Math.max(canvas.width-w,x));y=Math.min(0,Math.max(canvas.height-h,y));};
+      const draw=()=>{if(!image.complete||!image.naturalWidth)return;clamp();ctx.clearRect(0,0,600,600);ctx.drawImage(image,x,y,image.naturalWidth*scale,image.naturalHeight*scale);};
+      const center=()=>{minScale=Math.max(600/image.naturalWidth,600/image.naturalHeight);scale=Math.max(minScale,Math.min(minScale*4,scale||minScale));x=(600-image.naturalWidth*scale)/2;y=(600-image.naturalHeight*scale)/2;draw();};
+      const coords=(e)=>{const r=canvas.getBoundingClientRect();return {x:(e.clientX-r.left)*600/r.width,y:(e.clientY-r.top)*600/r.height};};
+      image.onload=()=>{scale=0;center();};image.src=data.image;
+      canvas.onpointerdown=e=>{drag=true;canvas.setPointerCapture(e.pointerId);const p=coords(e);lastX=p.x;lastY=p.y;};
+      canvas.onpointermove=e=>{if(!drag)return;const p=coords(e);x+=p.x-lastX;y+=p.y-lastY;lastX=p.x;lastY=p.y;draw();};
+      canvas.onpointerup=canvas.onpointercancel=()=>{drag=false;};
+      canvas.onwheel=e=>{e.preventDefault();const r=canvas.getBoundingClientRect(),px=(e.clientX-r.left)*600/r.width,py=(e.clientY-r.top)*600/r.height;const old=scale;scale=Math.max(minScale,Math.min(minScale*4,scale*(e.deltaY<0?1.1:.9)));x=px-(px-x)*(scale/old);y=py-(py-y)*(scale/old);draw();};
+      stage.addEventListener('touchstart',e=>{if(e.touches.length===2){pinchDistance=Math.hypot(e.touches[0].clientX-e.touches[1].clientX,e.touches[0].clientY-e.touches[1].clientY);pinchScale=scale;}},{passive:true});
+      stage.addEventListener('touchmove',e=>{if(e.touches.length===2&&pinchDistance){e.preventDefault();const d=Math.hypot(e.touches[0].clientX-e.touches[1].clientX,e.touches[0].clientY-e.touches[1].clientY);const old=scale;scale=Math.max(minScale,Math.min(minScale*4,pinchScale*d/pinchDistance));const rect=canvas.getBoundingClientRect(),px=((e.touches[0].clientX+e.touches[1].clientX)/2-rect.left)*600/rect.width,py=((e.touches[0].clientY+e.touches[1].clientY)/2-rect.top)*600/rect.height;x=px-(px-x)*(scale/old);y=py-(py-y)*(scale/old);draw();}},{passive:false});
+      parentElement.querySelector('#reset').onclick=()=>{scale=0;center();status.textContent='Снимката е центрирана.';};
+      parentElement.querySelector('#save').onclick=()=>{draw();const jpeg=canvas.toDataURL('image/jpeg',.82);setStateValue('cropped',jpeg);setTriggerValue('savedAt',Date.now());status.textContent='✅ Кадърът е запазен.';};
+    }
+    """,
+)
+
+def direct_profile_crop(photo,index):
+    if not photo:return None,None
+    raw=photo.getvalue()
+    if len(raw)>8*1024*1024:
+        st.error("Снимката е прекалено голяма. Максимум 8 MB.");return None,None
+    source="data:"+(photo.type or "image/jpeg")+";base64,"+base64.b64encode(raw).decode("ascii")
+    key=f"direct_photo_crop_{index}_{hashlib.sha256(raw).hexdigest()[:12]}"
+    result=PROFILE_CROP_COMPONENT(data={"image":source},default={"cropped":"","savedAt":None},key=key,on_cropped_change=lambda:None,on_savedAt_change=lambda:None,height=500)
+    state=st.session_state.get(key,{}) or {}
+    cropped=(getattr(result,"cropped","") or state.get("cropped") or "")
+    if not cropped:return None,None
+    try:
+        payload=cropped.split(",",1)[1] if "," in cropped else cropped
+        image_bytes=base64.b64decode(payload)
+        image=Image.open(io.BytesIO(image_bytes));image.load()
+        if image.size!=(600,600):image=image.resize((600,600),Image.Resampling.LANCZOS)
+        out=io.BytesIO();image.convert("RGB").save(out,format="JPEG",quality=82,optimize=True,progressive=True)
+        return out.getvalue(),"image/jpeg"
+    except Exception:
+        st.error("Избраният кадър не може да бъде обработен.");return None,None
+
 def register_parent():
     st.subheader("Регистрация на родител")
     child_count=st.number_input("Брой деца за добавяне сега",1,5,1,key="registration_child_count")
@@ -2224,11 +2311,11 @@ def register_parent():
         )
         image_bytes=image_mime=None
         if photo:
-            image_bytes,image_mime=prepare_profile_photo(photo,50,50,1.0)
+            image_bytes,image_mime=direct_profile_crop(photo,i)
             if image_bytes:
-                circular_preview(image_bytes,220)
-                st.caption("Кръглият преглед показва как ще изглежда профилната снимка. За различен кадър натиснете отново бутона за снимка и изберете/заснемете нова.")
-                st.success("✅ Профилната снимка е готова.")
+                st.success("✅ Избраният кадър е готов за профилна снимка.")
+            else:
+                st.info("Преместете и увеличете снимката директно в кръга, после натиснете „Използвай този кадър“.")
         else:st.warning("Снимката на детето е задължителна за завършване на регистрацията.")
         children.append((cf,cl,bd,image_bytes,image_mime))
     submit=st.button("Изпрати регистрация",use_container_width=True,type="primary",key="submit_parent_registration")
