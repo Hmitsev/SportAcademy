@@ -1,0 +1,15 @@
+Add in Render > Environment:
+
+VAPID_PUBLIC_KEY=BG288f1m8EJgp5Em8XJTSz6_4RzoUSCfHL1kSRuy_2-pgX7toiN6rPOnlnRS5fnelLUtfMfajvocCRnB5BDTqjE
+VAPID_PRIVATE_KEY=-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgKBVeQSy0QogEtB/L\nihr7S5E+2DD5dMpRZMZsPRxjfLihRANCAARtvPH9ZvBCYKeRJvFyU0s+v+Ec6FEg\nnxy9ZEkbsv9vqYF+7aIjeqzzp5Z0UuX53pS1LXzH2o76HAkZweQQ06ox\n-----END PRIVATE KEY-----\n
+VAPID_SUBJECT=mailto:dyulgerovacademy@gmail.com
+
+1. Replace app.py.
+2. Add requirements-push.txt lines to requirements.txt.
+3. Copy .streamlit/config.toml.
+4. Add the variables above in Render.
+5. Deploy.
+6. Each user opens "📲 Известия на телефона" and enables notifications once.
+
+iPhone/iPad: Safari > Share > Add to Home Screen, open the icon, then enable notifications.
+Android/desktop: allow notifications directly in the browser.
