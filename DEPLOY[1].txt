@@ -1,5 +1,6 @@
-1. Replace app.py with this one.
-2. Replace static/service-worker.js with this one.
-3. requirements.txt must contain pywebpush==2.5.0 and streamlit>=1.66.0.
-4. Keep VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY and VAPID_SUBJECT in Render.
-5. Deploy. Every logged-in user can open "Известия на телефона", activate notifications, and use the test button.
+1. Replace only app.py in GitHub.
+2. Do NOT upload RENDER_NEW_VAPID_KEYS_PRIVATE.txt to GitHub.
+3. Open that private TXT locally and replace VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY in Render.
+4. Keep VAPID_SUBJECT=mailto:hmitsevapps@gmail.com.
+5. Save, rebuild and deploy.
+6. Open each device profile and activate notifications again once. Old subscriptions are deactivated automatically when the public key changes.
