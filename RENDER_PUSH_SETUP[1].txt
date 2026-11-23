@@ -1,15 +1,18 @@
-Add in Render > Environment:
+RENDER ENVIRONMENT - NEW VAPID PAIR
 
-VAPID_PUBLIC_KEY=BG288f1m8EJgp5Em8XJTSz6_4RzoUSCfHL1kSRuy_2-pgX7toiN6rPOnlnRS5fnelLUtfMfajvocCRnB5BDTqjE
-VAPID_PRIVATE_KEY=-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgKBVeQSy0QogEtB/L\nihr7S5E+2DD5dMpRZMZsPRxjfLihRANCAARtvPH9ZvBCYKeRJvFyU0s+v+Ec6FEg\nnxy9ZEkbsv9vqYF+7aIjeqzzp5Z0UuX53pS1LXzH2o76HAkZweQQ06ox\n-----END PRIVATE KEY-----\n
-VAPID_SUBJECT=mailto:dyulgerovacademy@gmail.com
+1) VAPID_PUBLIC_KEY
+BAhBghVYdN7MPsWqxBBJUS8_XXWcA1Gec4jt11t-4Pc6g-kcZ1dnSVY35xc63vcif7WJZNm2SjBOu-1Tyqse_4A
 
-1. Replace app.py.
-2. Add requirements-push.txt lines to requirements.txt.
-3. Copy .streamlit/config.toml.
-4. Add the variables above in Render.
-5. Deploy.
-6. Each user opens "📲 Известия на телефона" and enables notifications once.
+2) VAPID_PRIVATE_KEY
+-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQghWDqbtX4g/H/GrPc\nwb8dxCNt0VGVcjHfTa+jgM6+WA2hRANCAAQIQYIVWHTezD7FqsQQSVEvP111nANR\nnnOI7ddbfuD3OoPpHGdXZ0lWN+cXOt73In+1iWTZtkowTrvtU8qrHv+A\n-----END PRIVATE KEY-----\n
 
-iPhone/iPad: Safari > Share > Add to Home Screen, open the icon, then enable notifications.
-Android/desktop: allow notifications directly in the browser.
+3) VAPID_SUBJECT
+mailto:hmitsevapps@gmail.com
+
+IMPORTANT
+- Copy only the value, without quotation marks.
+- Do not press Render Generate.
+- Save, rebuild and deploy.
+- The app automatically deactivates subscriptions made with the old public key.
+- Every device must open Push settings and activate again once after the deploy.
+- Keep this file private and do not commit it to GitHub.
