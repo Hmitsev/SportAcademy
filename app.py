@@ -23,22 +23,12 @@ DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 ACADEMY_SLUG = os.getenv("ACADEMY_SLUG", "dyulgerov-academy")
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "admin@academy.local").strip().lower()
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "ChangeMe123!")
-def normalize_vapid_private_key(value):
-    value=(value or "").strip().strip('"').strip("'")
-    value=value.replace("\\r\\n","\n").replace("\\n","\n").replace("\r\n","\n")
-    if "-----BEGIN PRIVATE KEY-----" in value:
-        body=value.split("-----BEGIN PRIVATE KEY-----",1)[1].split("-----END PRIVATE KEY-----",1)[0]
-        body="".join(body.split())
-        return f"-----BEGIN PRIVATE KEY-----\n{body}\n-----END PRIVATE KEY-----\n"
-    if "-----BEGIN EC PRIVATE KEY-----" in value:
-        body=value.split("-----BEGIN EC PRIVATE KEY-----",1)[1].split("-----END EC PRIVATE KEY-----",1)[0]
-        body="".join(body.split())
-        return f"-----BEGIN EC PRIVATE KEY-----\n{body}\n-----END EC PRIVATE KEY-----\n"
-    return value
-
 VAPID_PUBLIC_KEY = os.getenv("VAPID_PUBLIC_KEY", "").strip().strip('"').strip("'")
-VAPID_PRIVATE_KEY = normalize_vapid_private_key(os.getenv("VAPID_PRIVATE_KEY", ""))
+# IMPORTANT: this is a 32-byte P-256 private scalar encoded as base64url, not PEM.
+# pywebpush/py_vapid reads this raw representation directly, avoiding Render multiline PEM issues.
+VAPID_PRIVATE_KEY = os.getenv("VAPID_PRIVATE_KEY", "").strip().strip('"').strip("'")
 VAPID_SUBJECT = os.getenv("VAPID_SUBJECT", "mailto:hmitsevapps@gmail.com").strip()
+
 ASSETS = {
     "logo": APP_DIR / "лого.jpg",
     "background": APP_DIR / "беграуд.jpg",
@@ -1259,6 +1249,14 @@ def current_user():
 def browser_push_ready():
     return bool(VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY and VAPID_SUBJECT)
 
+def vapid_private_key_shape_ok():
+    try:
+        padding="="*((4-len(VAPID_PRIVATE_KEY)%4)%4)
+        raw=base64.urlsafe_b64decode(VAPID_PRIVATE_KEY+padding)
+        return len(raw)==32
+    except Exception:
+        return False
+
 def vapid_key_fingerprint():
     return hashlib.sha256(VAPID_PUBLIC_KEY.encode("utf-8")).hexdigest() if VAPID_PUBLIC_KEY else ""
 
@@ -1287,6 +1285,8 @@ def save_push_subscription(user_id, subscription, user_agent=None):
 def send_browser_push(user_id,title,body="",return_details=False):
     if not browser_push_ready() or not user_id:
         r={"sent":0,"errors":["Липсва VAPID конфигурация или user_id."],"attempted":0};return r if return_details else 0
+    if not vapid_private_key_shape_ok():
+        r={"sent":0,"errors":["VAPID_PRIVATE_KEY не е валиден 32-byte P-256 raw base64url ключ. Подмени го с новата стойност от PRIVATE_RENDER_KEYS.txt."],"attempted":0};return r if return_details else 0
     rows=fetchall("SELECT id,endpoint,p256dh,auth FROM push_subscriptions WHERE academy_id=%s AND user_id=%s AND active",(ACADEMY_ID,user_id));payload=json.dumps({"title":title,"body":body or "Имате ново известие от Dyulgerov Academy.","url":"/"},ensure_ascii=False);sent=0;errors=[]
     for row in rows:
         try:
