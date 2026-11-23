@@ -1,0 +1,5 @@
+1. Replace app.py with this one.
+2. Replace static/service-worker.js with this one.
+3. requirements.txt must contain pywebpush==2.5.0 and streamlit>=1.66.0.
+4. Keep VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY and VAPID_SUBJECT in Render.
+5. Deploy. Every logged-in user can open "Известия на телефона", activate notifications, and use the test button.
