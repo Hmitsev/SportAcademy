@@ -1257,21 +1257,18 @@ def save_push_subscription(user_id, subscription, user_agent=None):
             (ACADEMY_ID,user_id,subscription["endpoint"],keys["p256dh"],keys["auth"],user_agent))
     return True
 
-def send_browser_push(user_id,title,body=""):
-    if not browser_push_ready() or not user_id:return 0
-    rows=fetchall("SELECT id,endpoint,p256dh,auth FROM push_subscriptions WHERE academy_id=%s AND user_id=%s AND active",(ACADEMY_ID,user_id))
-    payload=json.dumps({"title":title,"body":body or "Имате ново известие от Dyulgerov Academy.","url":"/"},ensure_ascii=False)
-    sent=0
+def send_browser_push(user_id,title,body="",return_details=False):
+    if not browser_push_ready() or not user_id:
+        r={"sent":0,"errors":["Липсва VAPID конфигурация или user_id."],"attempted":0};return r if return_details else 0
+    rows=fetchall("SELECT id,endpoint,p256dh,auth FROM push_subscriptions WHERE academy_id=%s AND user_id=%s AND active",(ACADEMY_ID,user_id));payload=json.dumps({"title":title,"body":body or "Имате ново известие от Dyulgerov Academy.","url":"/"},ensure_ascii=False);sent=0;errors=[]
     for row in rows:
         try:
-            webpush(subscription_info={"endpoint":row["endpoint"],"keys":{"p256dh":row["p256dh"],"auth":row["auth"]}},data=payload,vapid_private_key=VAPID_PRIVATE_KEY,vapid_claims={"sub":VAPID_SUBJECT},ttl=300)
-            sent+=1
+            webpush(subscription_info={"endpoint":row["endpoint"],"keys":{"p256dh":row["p256dh"],"auth":row["auth"]}},data=payload,vapid_private_key=VAPID_PRIVATE_KEY,vapid_claims={"sub":VAPID_SUBJECT},ttl=300);sent+=1
         except WebPushException as exc:
-            if getattr(getattr(exc,"response",None),"status_code",None) in (404,410):
-                execute("UPDATE push_subscriptions SET active=FALSE,updated_at=NOW() WHERE id=%s",(row["id"],))
-        except Exception:
-            pass
-    return sent
+            response=getattr(exc,"response",None);status=getattr(response,"status_code",None);text=(getattr(response,"text",None) or "").strip() if response is not None else "";host=row["endpoint"].split("/")[2] if "://" in row["endpoint"] else "push endpoint";errors.append(f"{host}: HTTP {status or '?'} · {text or str(exc)}"[:1200])
+            if status in (404,410):execute("UPDATE push_subscriptions SET active=FALSE,updated_at=NOW() WHERE id=%s",(row["id"],))
+        except Exception as exc:errors.append(f"{type(exc).__name__}: {exc}"[:1200])
+    r={"sent":sent,"errors":errors,"attempted":len(rows)};return r if return_details else sent
 
 def create_notification(user_id, notification_type, title, body=""):
     execute("INSERT INTO notifications(academy_id,user_id,notification_type,title,body) VALUES(%s,%s,%s,%s,%s)",(ACADEMY_ID,user_id,notification_type,title,body))
@@ -4304,9 +4301,10 @@ def render_push_opt_in(user):
         else:
             st.warning("⚠️ Устройството още не е записано към профила.")
         if st.button("🧪 Изпрати тестово Push",key=f"test_push_{user['id']}",use_container_width=True,disabled=saved_count==0):
-            sent=send_browser_push(user["id"],"Dyulgerov Academy","Тестовото Push известие работи успешно.")
-            if sent:st.success(f"✅ Изпратено към {sent} устройство/а.")
-            else:st.error("Push услугата не прие изпращането. Провери Render лога.")
+            push_result=send_browser_push(user["id"],"Dyulgerov Academy","Тестовото Push известие работи успешно.",return_details=True)
+            if push_result["sent"]:st.success(f"✅ Изпратено успешно към {push_result['sent']} от {push_result['attempted']} устройство/а.")
+            else:st.error(f"❌ Push не е изпратен. Опити: {push_result['attempted']}.")
+            for push_error in push_result["errors"]:st.code(push_error,language=None)
 
 def render_app():
     user = current_user()
