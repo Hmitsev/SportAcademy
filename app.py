@@ -2086,7 +2086,38 @@ def staff_team_chat(user):
         data=attachment.getvalue() if attachment else None
         if not body.strip() and not data:st.error("Напишете съобщение или прикачете файл.")
         elif data and len(data)>8*1024*1024:st.error("Файлът е прекалено голям. Максимум 8 MB.")
-        else:execute("INSERT INTO staff_chat_messages(academy_id,sender_user_id,body,file_name,file_mime,file_data) VALUES(%s,%s,%s,%s,%s,%s)",(ACADEMY_ID,user['id'],body.strip() or None,attachment.name if attachment else None,attachment.type if attachment else None,data));st.rerun()
+        else:
+            execute(
+                """INSERT INTO staff_chat_messages(
+                       academy_id,sender_user_id,body,file_name,file_mime,file_data)
+                   VALUES(%s,%s,%s,%s,%s,%s)""",
+                (
+                    ACADEMY_ID,
+                    user['id'],
+                    body.strip() or None,
+                    attachment.name if attachment else None,
+                    attachment.type if attachment else None,
+                    data,
+                ),
+            )
+            sender_name=f"{user['first_name']} {user['last_name']}".strip()
+            staff_recipients=fetchall(
+                """SELECT id FROM users
+                   WHERE academy_id=%s
+                     AND role IN ('admin','coach','specialist')
+                     AND active
+                     AND account_status='approved'
+                     AND id<>%s""",
+                (ACADEMY_ID,user['id']),
+            )
+            for recipient in staff_recipients:
+                create_notification(
+                    recipient['id'],
+                    'staff_chat',
+                    'Ново съобщение в Екипен чат',
+                    f"От {sender_name}",
+                )
+            st.rerun()
     rows=fetchall("""SELECT m.*,u.first_name,u.last_name,u.role FROM staff_chat_messages m LEFT JOIN users u ON u.id=m.sender_user_id WHERE m.academy_id=%s AND m.created_at>=NOW()-INTERVAL '10 days' ORDER BY m.created_at DESC LIMIT 200""",(ACADEMY_ID,))
     if not rows:st.info("Няма съобщения от последните 10 дни.")
     for row in rows:
@@ -3339,6 +3370,9 @@ def specialist_panel(user):
     st.sidebar.caption(f"{profile['display_name']} · {specialist_role_label(profile['specialist_type'])}")
     sections=["Табло","Тренировки","Мачове","Съобщения","Информация","Статистика","🏆 Резултати","🛍️ Екипировка / Аксесоари","💬 Екипен чат"]
     sec=st.sidebar.radio("Меню",sections,key="specialist_menu")
+    if sec=="💬 Екипен чат":
+        staff_team_chat(user)
+        return
     if not teams:st.info("Все още няма зачислени набори към този профил.");return
     tmap={t["name"]:t for t in teams};team=tmap[st.selectbox("Набор",list(tmap),key="specialist_team")]
     if sec=="Табло":
@@ -4169,6 +4203,7 @@ def render_app():
 
     else:
         logout_button()
+        render_push_opt_in(user)
 
         if user["role"] == "admin":
             admin_panel(user)
