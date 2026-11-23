@@ -4130,7 +4130,7 @@ def coach_panel(user):
         return
     st.sidebar.markdown(avatar_html(coach.get("profile_image"),coach.get("profile_image_mime"),72),unsafe_allow_html=True)
     st.sidebar.caption(coach["display_name"])
-    sections = ["Табло", "Тренировки и мачове", "Упражнения", "Присъствие", "Такси", "Съобщения", "Обратна връзка", "🏆 Резултати", "🛍️ Екипировка / Аксесоари", "📦 Инвентар", "💬 Екипен чат"]
+    sections = ["Табло", "Тренировки и мачове", "Такси", "Съобщения", "Обратна връзка", "Присъствие", "Упражнения", "🏆 Резултати", "🛍️ Екипировка / Аксесоари", "📦 Инвентар", "💬 Екипен чат"]
     sec = st.sidebar.radio("Треньорско меню", sections)
     tmap = {t["name"]: t for t in teams}
     team_name = st.selectbox("Набор", list(tmap), key="coach_selected_team")
@@ -4270,17 +4270,19 @@ def coach_panel(user):
     elif sec == "💬 Екипен чат":
         staff_team_chat(user)
     elif sec == "Съобщения":
-        staff_direct_messages_panel(user)
-        st.divider()
         st.subheader("📢 Съобщение към родители")
+        st.caption(f"Избран набор: {team['name']}")
         with st.form("coach_message_form"):
-            title = st.text_input("Заглавие"); body = st.text_area("Съобщение към родителите"); send = st.form_submit_button("Изпрати към групата", use_container_width=True)
+            title = st.text_input("Заглавие")
+            body = st.text_area("Съобщение към родителите")
+            send = st.form_submit_button("Изпрати към групата", use_container_width=True)
         if send and title.strip() and body.strip():
             execute("INSERT INTO team_messages(academy_id,team_id,sender_user_id,title,body) VALUES(%s,%s,%s,%s,%s)", (ACADEMY_ID,team["id"],user["id"],title.strip(),body.strip()))
             notify_team_parents(team["id"], "message", title.strip(), body.strip())
             st.success("Съобщението е добавено в архива.")
             st.rerun()
-        st.divider(); st.subheader("Архив на съобщенията")
+        st.divider()
+        st.subheader("Архив на съобщенията към родители")
         rows = fetchall("SELECT * FROM team_messages WHERE academy_id=%s AND team_id=%s ORDER BY created_at DESC", (ACADEMY_ID,team["id"]))
         for row in rows:
             with st.container(border=True):
@@ -4288,6 +4290,13 @@ def coach_panel(user):
                 if row.get("sender_user_id") == user["id"] and st.button("🗑️ Изтрий", key=f"coach_delete_message_{row['id']}"):
                     execute("DELETE FROM team_messages WHERE academy_id=%s AND id=%s", (ACADEMY_ID,row['id']))
                     st.rerun()
+        st.divider()
+        st.subheader("💬 Екипен чат")
+        st.caption("Съобщения между Admin, треньори и кондиционен/поддържащ екип.")
+        staff_team_chat(user)
+        st.divider()
+        with st.expander("✉️ Лични съобщения между треньори", expanded=False):
+            staff_direct_messages_panel(user)
 
     elif sec == "Обратна връзка":
         st.subheader("📨 Съобщения от Admin")
