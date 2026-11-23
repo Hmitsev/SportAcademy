@@ -4225,12 +4225,13 @@ def logout_button():
 
 PUSH_COMPONENT = st.components.v2.component(
     "dyulgerov_push_opt_in_v3",
-    html="""<div class="push-box"><button type="button" id="push-enable">🔔 Активирай известия</button><span id="push-status"></span></div>""",
+    html="""<div class="push-box"><button type="button" id="push-enable">🔔 Активирай известия</button><button type="button" id="push-reregister">♻️ Пререгистрирай устройството</button><span id="push-status"></span></div>""",
     css=""".push-box{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.push-box button{background:linear-gradient(135deg,#956b20,#d1ad57);color:white;border:1px solid #e2c777;border-radius:10px;padding:10px 14px;font-weight:800;cursor:pointer}.push-box button:disabled{opacity:.55;cursor:wait}.push-box span{font-size:.86rem;color:var(--st-text-color)}""",
     js="""
     export default function(component) {
       const {parentElement,data,setStateValue,setTriggerValue}=component;
       const button=parentElement.querySelector('#push-enable');
+      const reregister=parentElement.querySelector('#push-reregister');
       const status=parentElement.querySelector('#push-status');
       const withTimeout=(promise,ms,label)=>Promise.race([
         promise,
@@ -4246,6 +4247,14 @@ PUSH_COMPONENT = st.components.v2.component(
         button.textContent='🔔 Опитай отново';
         status.textContent='Грешка: '+(err?.message||String(err));
       };
+      const registerFresh=async()=>{
+        const reg=await withTimeout(navigator.serviceWorker.register('/app/static/service-worker.js',{scope:'/app/static/',updateViaCache:'none'}),10000,'Service Worker');
+        let oldSub=await withTimeout(reg.pushManager.getSubscription(),5000,'Стар Push абонамент');
+        if(oldSub){status.textContent='♻️ Премахване на стария Push абонамент...';await withTimeout(oldSub.unsubscribe(),10000,'Премахване на стария Push абонамент');}
+        status.textContent='Създаване на нов Push абонамент...';
+        const sub=await withTimeout(reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:decodeKey(data.publicKey)}),15000,'Нов Push абонамент');
+        setStateValue('subscription',JSON.stringify(sub.toJSON()));setStateValue('userAgent',navigator.userAgent);setTriggerValue('saveRequest',Date.now());setTriggerValue('reRegister',Date.now());
+      };
       const refresh=async()=>{
         try{
           if(!('serviceWorker' in navigator)||!('PushManager' in window)){button.disabled=true;status.textContent='Този браузър не поддържа Web Push.';return;}
@@ -4254,6 +4263,10 @@ PUSH_COMPONENT = st.components.v2.component(
           const sub=reg?await withTimeout(reg.pushManager.getSubscription(),5000,'Проверката на Push абонамента'):null;
           if(sub){button.textContent='✅ Известията са активни';status.textContent='Това устройство е регистрирано.';setStateValue('subscription',JSON.stringify(sub.toJSON()));setStateValue('userAgent',navigator.userAgent);setTriggerValue('saveRequest',Date.now());}
         }catch(err){/* refresh must never block the UI */}
+      };
+      reregister.onclick=async()=>{
+        button.disabled=true;reregister.disabled=true;
+        try{status.textContent='♻️ Пререгистрация с текущия VAPID ключ...';await registerFresh();button.textContent='✅ Известията са активни';status.textContent='Новият Push абонамент е създаден и изпратен за запис.';}catch(err){finishError(err);}finally{button.disabled=false;reregister.disabled=false;}
       };
       button.onclick=async()=>{
         button.disabled=true;
@@ -4297,11 +4310,12 @@ def render_push_opt_in(user):
     with st.sidebar.expander("📲 Известия на телефона",expanded=False):
         result=PUSH_COMPONENT(
             data={"publicKey":VAPID_PUBLIC_KEY},
-            default={"subscription":"","userAgent":"","saveRequest":None},
+            default={"subscription":"","userAgent":"","saveRequest":None,"reRegister":None},
             key=component_key,
             on_subscription_change=lambda: None,
             on_userAgent_change=lambda: None,
             on_saveRequest_change=lambda: None,
+            on_reRegister_change=lambda: None,
         )
         component_state=st.session_state.get(component_key,{}) or {}
         raw=(getattr(result,"subscription","") or component_state.get("subscription") or "")
@@ -4317,6 +4331,7 @@ def render_push_opt_in(user):
                 existing=fetchone("SELECT id FROM push_subscriptions WHERE academy_id=%s AND user_id=%s AND endpoint=%s AND active",(ACADEMY_ID,user["id"],endpoint))
                 if not existing or st.session_state.get(state_key)!=fingerprint:
                     if save_push_subscription(user["id"],subscription,user_agent):
+                        execute("UPDATE push_subscriptions SET active=FALSE,updated_at=NOW() WHERE academy_id=%s AND user_id=%s AND endpoint<>%s AND active",(ACADEMY_ID,user["id"],endpoint))
                         st.session_state[state_key]=fingerprint
                         st.success("✅ Устройството е записано към профила.")
             except Exception as exc:
