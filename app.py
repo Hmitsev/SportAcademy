@@ -4205,7 +4205,7 @@ PUSH_COMPONENT = st.components.v2.component(
     css=""".push-box{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.push-box button{background:linear-gradient(135deg,#956b20,#d1ad57);color:white;border:1px solid #e2c777;border-radius:10px;padding:10px 14px;font-weight:800;cursor:pointer}.push-box button:disabled{opacity:.55;cursor:wait}.push-box span{font-size:.86rem;color:var(--st-text-color)}""",
     js="""
     export default function(component) {
-      const {parentElement,data,setStateValue}=component;
+      const {parentElement,data,setStateValue,setTriggerValue}=component;
       const button=parentElement.querySelector('#push-enable');
       const status=parentElement.querySelector('#push-status');
       const withTimeout=(promise,ms,label)=>Promise.race([
@@ -4228,7 +4228,7 @@ PUSH_COMPONENT = st.components.v2.component(
           if(Notification.permission==='denied'){button.disabled=true;status.textContent='Известията са блокирани от настройките на браузъра.';return;}
           const reg=await withTimeout(navigator.serviceWorker.getRegistration('/app/static/'),5000,'Проверката на Service Worker');
           const sub=reg?await withTimeout(reg.pushManager.getSubscription(),5000,'Проверката на Push абонамента'):null;
-          if(sub){button.textContent='✅ Известията са активни';status.textContent='Това устройство е регистрирано.';setStateValue('subscription',JSON.stringify(sub.toJSON()));setStateValue('userAgent',navigator.userAgent);}
+          if(sub){button.textContent='✅ Известията са активни';status.textContent='Това устройство е регистрирано.';setStateValue('subscription',JSON.stringify(sub.toJSON()));setStateValue('userAgent',navigator.userAgent);setTriggerValue('saveRequest',Date.now());}
         }catch(err){/* refresh must never block the UI */}
       };
       button.onclick=async()=>{
@@ -4255,6 +4255,7 @@ PUSH_COMPONENT = st.components.v2.component(
           }
           setStateValue('subscription',JSON.stringify(sub.toJSON()));
           setStateValue('userAgent',navigator.userAgent);
+          setTriggerValue('saveRequest',Date.now());
           button.disabled=false;
           button.textContent='✅ Известията са активни';
           status.textContent='Устройството е регистрирано.';
@@ -4268,29 +4269,44 @@ def render_push_opt_in(user):
     if not browser_push_ready():
         st.sidebar.warning("Push известията не са конфигурирани.")
         return
+    component_key=f"push_opt_in_{user['id']}"
     with st.sidebar.expander("📲 Известия на телефона",expanded=False):
         result=PUSH_COMPONENT(
             data={"publicKey":VAPID_PUBLIC_KEY},
-            default={"subscription":"","userAgent":""},
-            key=f"push_opt_in_{user['id']}",
+            default={"subscription":"","userAgent":"","saveRequest":None},
+            key=component_key,
             on_subscription_change=lambda: None,
             on_userAgent_change=lambda: None,
+            on_saveRequest_change=lambda: None,
         )
-        raw=getattr(result,"subscription","") or ""
+        component_state=st.session_state.get(component_key,{}) or {}
+        raw=(getattr(result,"subscription","") or component_state.get("subscription") or "")
+        user_agent=(getattr(result,"userAgent","") or component_state.get("userAgent") or None)
         if raw:
             try:
                 subscription=json.loads(raw)
-                fingerprint=hashlib.sha256(subscription.get("endpoint","").encode()).hexdigest()
+                endpoint=subscription.get("endpoint","")
+                if not endpoint:
+                    raise ValueError("Липсва browser endpoint.")
+                fingerprint=hashlib.sha256(endpoint.encode()).hexdigest()
                 state_key=f"saved_push_{user['id']}"
-                if st.session_state.get(state_key)!=fingerprint and save_push_subscription(user["id"],subscription,getattr(result,"userAgent","") or None):
-                    st.session_state[state_key]=fingerprint
-                    st.success("✅ Известията са активирани за това устройство.")
-            except Exception:
-                st.error("Абонаментът за известия не може да бъде записан.")
-        if st.button("🧪 Изпрати тестово Push",key=f"test_push_{user['id']}",use_container_width=True):
+                existing=fetchone("SELECT id FROM push_subscriptions WHERE academy_id=%s AND user_id=%s AND endpoint=%s AND active",(ACADEMY_ID,user["id"],endpoint))
+                if not existing or st.session_state.get(state_key)!=fingerprint:
+                    if save_push_subscription(user["id"],subscription,user_agent):
+                        st.session_state[state_key]=fingerprint
+                        st.success("✅ Устройството е записано към профила.")
+            except Exception as exc:
+                st.error(f"Абонаментът не може да бъде записан: {exc}")
+        saved_devices=fetchone("SELECT COUNT(*) c FROM push_subscriptions WHERE academy_id=%s AND user_id=%s AND active",(ACADEMY_ID,user["id"]))
+        saved_count=int(saved_devices["c"] if saved_devices else 0)
+        if saved_count:
+            st.success(f"✅ Записани устройства: {saved_count}")
+        else:
+            st.warning("⚠️ Устройството още не е записано към профила.")
+        if st.button("🧪 Изпрати тестово Push",key=f"test_push_{user['id']}",use_container_width=True,disabled=saved_count==0):
             sent=send_browser_push(user["id"],"Dyulgerov Academy","Тестовото Push известие работи успешно.")
             if sent:st.success(f"✅ Изпратено към {sent} устройство/а.")
-            else:st.warning("Първо активирай известията на това устройство.")
+            else:st.error("Push услугата не прие изпращането. Провери Render лога.")
 
 def render_app():
     user = current_user()
