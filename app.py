@@ -23,8 +23,21 @@ DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 ACADEMY_SLUG = os.getenv("ACADEMY_SLUG", "dyulgerov-academy")
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "admin@academy.local").strip().lower()
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "ChangeMe123!")
-VAPID_PUBLIC_KEY = os.getenv("VAPID_PUBLIC_KEY", "").strip()
-VAPID_PRIVATE_KEY = os.getenv("VAPID_PRIVATE_KEY", "").replace("\\n", "\n").strip()
+def normalize_vapid_private_key(value):
+    value=(value or "").strip().strip('"').strip("'")
+    value=value.replace("\\r\\n","\n").replace("\\n","\n").replace("\r\n","\n")
+    if "-----BEGIN PRIVATE KEY-----" in value:
+        body=value.split("-----BEGIN PRIVATE KEY-----",1)[1].split("-----END PRIVATE KEY-----",1)[0]
+        body="".join(body.split())
+        return f"-----BEGIN PRIVATE KEY-----\n{body}\n-----END PRIVATE KEY-----\n"
+    if "-----BEGIN EC PRIVATE KEY-----" in value:
+        body=value.split("-----BEGIN EC PRIVATE KEY-----",1)[1].split("-----END EC PRIVATE KEY-----",1)[0]
+        body="".join(body.split())
+        return f"-----BEGIN EC PRIVATE KEY-----\n{body}\n-----END EC PRIVATE KEY-----\n"
+    return value
+
+VAPID_PUBLIC_KEY = os.getenv("VAPID_PUBLIC_KEY", "").strip().strip('"').strip("'")
+VAPID_PRIVATE_KEY = normalize_vapid_private_key(os.getenv("VAPID_PRIVATE_KEY", ""))
 VAPID_SUBJECT = os.getenv("VAPID_SUBJECT", "mailto:hmitsevapps@gmail.com").strip()
 ASSETS = {
     "logo": APP_DIR / "лого.jpg",
@@ -1245,6 +1258,20 @@ def current_user():
 
 def browser_push_ready():
     return bool(VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY and VAPID_SUBJECT)
+
+def vapid_key_fingerprint():
+    return hashlib.sha256(VAPID_PUBLIC_KEY.encode("utf-8")).hexdigest() if VAPID_PUBLIC_KEY else ""
+
+def deactivate_subscriptions_from_old_vapid_key():
+    if not browser_push_ready(): return
+    execute("""CREATE TABLE IF NOT EXISTS push_config_state(academy_id BIGINT PRIMARY KEY REFERENCES academies(id) ON DELETE CASCADE,public_key_fingerprint TEXT NOT NULL,updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
+    current=vapid_key_fingerprint()
+    old=fetchone("SELECT public_key_fingerprint FROM push_config_state WHERE academy_id=%s",(ACADEMY_ID,))
+    if old and old.get("public_key_fingerprint")!=current:
+        execute("UPDATE push_subscriptions SET active=FALSE,updated_at=NOW() WHERE academy_id=%s AND active",(ACADEMY_ID,))
+    execute("""INSERT INTO push_config_state(academy_id,public_key_fingerprint,updated_at) VALUES(%s,%s,NOW()) ON CONFLICT(academy_id) DO UPDATE SET public_key_fingerprint=EXCLUDED.public_key_fingerprint,updated_at=NOW()""",(ACADEMY_ID,current))
+
+deactivate_subscriptions_from_old_vapid_key()
 
 def save_push_subscription(user_id, subscription, user_agent=None):
     if not isinstance(subscription, dict): return False
