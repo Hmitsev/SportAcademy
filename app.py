@@ -1457,6 +1457,20 @@ def fan_chat(user, team_id):
                        VALUES(%s,%s,%s,%s,%s,%s)""",
                     (ACADEMY_ID, team_id, user["id"], body.strip(), image_bytes, image_mime),
                 )
+                fan_recipients=fetchall(
+                    """SELECT DISTINCT u.id AS user_id
+                       FROM users u
+                       JOIN parent_players pp ON pp.parent_user_id=u.id AND pp.academy_id=u.academy_id
+                       JOIN players p ON p.id=pp.player_id AND p.academy_id=pp.academy_id
+                       WHERE u.academy_id=%s AND u.role='parent' AND u.active
+                         AND u.account_status='approved' AND p.team_id=%s
+                         AND p.active AND p.approval_status='approved' AND u.id<>%s""",
+                    (ACADEMY_ID,team_id,user["id"]),
+                )
+                sender_name=f"{user['first_name']} {user['last_name']}".strip()
+                preview=(body.strip()[:120] if body.strip() else "Изпратена е снимка.")
+                for recipient in fan_recipients:
+                    create_notification(recipient["user_id"],"fan_chat",f"Ново съобщение във ФЕН ЧАТ · {sender_name}",preview)
                 st.rerun()
 
     rows = fetchall(
@@ -4224,129 +4238,102 @@ def logout_button():
         st.rerun()
 
 PUSH_COMPONENT = st.components.v2.component(
-    "dyulgerov_push_opt_in_v3",
-    html="""<div class="push-box"><button type="button" id="push-enable">🔔 Активирай известия</button><button type="button" id="push-reregister">♻️ Пререгистрирай устройството</button><span id="push-status"></span></div>""",
-    css=""".push-box{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.push-box button{background:linear-gradient(135deg,#956b20,#d1ad57);color:white;border:1px solid #e2c777;border-radius:10px;padding:10px 14px;font-weight:800;cursor:pointer}.push-box button:disabled{opacity:.55;cursor:wait}.push-box span{font-size:.86rem;color:var(--st-text-color)}""",
+    "dyulgerov_push_auto_v1",
+    html="""
+    <div id="push-overlay" class="push-overlay" hidden>
+      <div class="push-dialog">
+        <div class="push-icon">⚽</div>
+        <h3>Известия от Dyulgerov Academy</h3>
+        <p>Разрешете известията, за да получавате веднага нови съобщения, графици, мачове и информация от Академията.</p>
+        <button type="button" id="push-allow">🔔 Разреши известията</button>
+        <button type="button" id="push-later" class="secondary">По-късно</button>
+        <div id="push-status" aria-live="polite"></div>
+      </div>
+    </div>
+    """,
+    css="""
+    .push-overlay{position:fixed;inset:0;z-index:999999;background:rgba(0,0,0,.76);display:flex;align-items:center;justify-content:center;padding:18px}
+    .push-overlay[hidden]{display:none!important}
+    .push-dialog{width:min(430px,94vw);background:linear-gradient(145deg,#090909,#18130a);border:1px solid #d6b765;border-radius:22px;padding:24px;text-align:center;box-shadow:0 24px 70px rgba(0,0,0,.65)}
+    .push-dialog h3{color:#fff;margin:8px 0 12px}.push-dialog p{color:#ded5c2;line-height:1.5}.push-icon{font-size:52px}
+    .push-dialog button{width:100%;min-height:46px;margin-top:10px;border-radius:12px;border:1px solid #e2c777;font-weight:800;cursor:pointer;background:linear-gradient(135deg,#956b20,#d1ad57);color:#fff}
+    .push-dialog button.secondary{background:transparent;border-color:#756641;color:#d8cfbd}.push-dialog button:disabled{opacity:.55;cursor:wait}
+    #push-status{margin-top:12px;color:#fff;font-size:.88rem}
+    """,
     js="""
     export default function(component) {
       const {parentElement,data,setStateValue,setTriggerValue}=component;
-      const button=parentElement.querySelector('#push-enable');
-      const reregister=parentElement.querySelector('#push-reregister');
+      const overlay=parentElement.querySelector('#push-overlay');
+      const allow=parentElement.querySelector('#push-allow');
+      const later=parentElement.querySelector('#push-later');
       const status=parentElement.querySelector('#push-status');
-      const withTimeout=(promise,ms,label)=>Promise.race([
-        promise,
-        new Promise((_,reject)=>setTimeout(()=>reject(new Error(label+' не отговори до '+Math.round(ms/1000)+' сек.')),ms))
-      ]);
-      const decodeKey=(value)=>{
-        const padding='='.repeat((4-value.length%4)%4);
-        const raw=atob((value+padding).replace(/-/g,'+').replace(/_/g,'/'));
-        return Uint8Array.from([...raw].map(c=>c.charCodeAt(0)));
-      };
-      const finishError=(err)=>{
-        button.disabled=false;
-        button.textContent='🔔 Опитай отново';
-        status.textContent='Грешка: '+(err?.message||String(err));
-      };
-      const registerFresh=async()=>{
+      const standalone=window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone===true;
+      const withTimeout=(promise,ms,label)=>Promise.race([promise,new Promise((_,reject)=>setTimeout(()=>reject(new Error(label+' не отговори.')),ms))]);
+      const decodeKey=(value)=>{const padding='='.repeat((4-value.length%4)%4);const raw=atob((value+padding).replace(/-/g,'+').replace(/_/g,'/'));return Uint8Array.from([...raw].map(c=>c.charCodeAt(0)));};
+      const sendSubscription=(sub)=>{setStateValue('subscription',JSON.stringify(sub.toJSON()));setStateValue('userAgent',navigator.userAgent);setTriggerValue('saveRequest',Date.now());};
+      const register=async(force=false)=>{
         const reg=await withTimeout(navigator.serviceWorker.register('/app/static/service-worker.js',{scope:'/app/static/',updateViaCache:'none'}),10000,'Service Worker');
-        let oldSub=await withTimeout(reg.pushManager.getSubscription(),5000,'Стар Push абонамент');
-        if(oldSub){status.textContent='♻️ Премахване на стария Push абонамент...';await withTimeout(oldSub.unsubscribe(),10000,'Премахване на стария Push абонамент');}
-        status.textContent='Създаване на нов Push абонамент...';
-        const sub=await withTimeout(reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:decodeKey(data.publicKey)}),15000,'Нов Push абонамент');
-        setStateValue('subscription',JSON.stringify(sub.toJSON()));setStateValue('userAgent',navigator.userAgent);setTriggerValue('saveRequest',Date.now());setTriggerValue('reRegister',Date.now());
+        let sub=await withTimeout(reg.pushManager.getSubscription(),5000,'Push абонаментът');
+        if(force && sub){await withTimeout(sub.unsubscribe(),10000,'Старата регистрация');sub=null;}
+        if(!sub)sub=await withTimeout(reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:decodeKey(data.publicKey)}),15000,'Новият Push абонамент');
+        sendSubscription(sub);return sub;
       };
-      const refresh=async()=>{
+      const boot=async()=>{
+        if(!('serviceWorker' in navigator)||!('PushManager' in window))return;
+        const reg=await navigator.serviceWorker.getRegistration('/app/static/');
+        const sub=reg?await reg.pushManager.getSubscription():null;
+        if(sub){sendSubscription(sub);return;}
+        if(standalone && Notification.permission!=='denied')overlay.hidden=false;
+      };
+      allow.onclick=async()=>{
+        allow.disabled=true;later.disabled=true;
         try{
-          if(!('serviceWorker' in navigator)||!('PushManager' in window)){button.disabled=true;status.textContent='Този браузър не поддържа Web Push.';return;}
-          if(Notification.permission==='denied'){button.disabled=true;status.textContent='Известията са блокирани от настройките на браузъра.';return;}
-          const reg=await withTimeout(navigator.serviceWorker.getRegistration('/app/static/'),5000,'Проверката на Service Worker');
-          const sub=reg?await withTimeout(reg.pushManager.getSubscription(),5000,'Проверката на Push абонамента'):null;
-          if(sub){button.textContent='✅ Известията са активни';status.textContent='Това устройство е регистрирано.';setStateValue('subscription',JSON.stringify(sub.toJSON()));setStateValue('userAgent',navigator.userAgent);setTriggerValue('saveRequest',Date.now());}
-        }catch(err){/* refresh must never block the UI */}
+          status.textContent='Активиране...';
+          const permission=await Notification.requestPermission();
+          if(permission!=='granted')throw new Error('Разрешението не е дадено. Може да го включите от настройките на браузъра.');
+          await register(false);
+          status.textContent='✅ Известията са активирани.';
+          setTimeout(()=>{overlay.hidden=true;},900);
+        }catch(err){status.textContent='Грешка: '+(err?.message||String(err));allow.disabled=false;later.disabled=false;}
       };
-      reregister.onclick=async()=>{
-        button.disabled=true;reregister.disabled=true;
-        try{status.textContent='♻️ Пререгистрация с текущия VAPID ключ...';await registerFresh();button.textContent='✅ Известията са активни';status.textContent='Новият Push абонамент е създаден и изпратен за запис.';}catch(err){finishError(err);}finally{button.disabled=false;reregister.disabled=false;}
-      };
-      button.onclick=async()=>{
-        button.disabled=true;
-        try{
-          status.textContent='1/3 Разрешение от браузъра...';
-          const permission=Notification.permission==='granted'?'granted':await withTimeout(Notification.requestPermission(),15000,'Разрешението за известия');
-          if(permission!=='granted')throw new Error('Разрешението за известия не е дадено.');
-
-          status.textContent='2/3 Регистрация на Service Worker...';
-          const reg=await withTimeout(
-            navigator.serviceWorker.register('/app/static/service-worker.js',{scope:'/app/static/',updateViaCache:'none'}),
-            10000,
-            'Регистрацията на Service Worker'
-          );
-          await withTimeout(reg.update().catch(()=>null),5000,'Обновяването на Service Worker');
-          let activeReg=reg;
-          if(!(reg.active||reg.waiting||reg.installing))throw new Error('Service Worker не е активен.');
-
-          status.textContent='3/3 Създаване на Push абонамент...';
-          let sub=await withTimeout(activeReg.pushManager.getSubscription(),5000,'Проверката на Push абонамента');
-          if(!sub){
-            sub=await withTimeout(activeReg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:decodeKey(data.publicKey)}),15000,'Push абонаментът');
-          }
-          setStateValue('subscription',JSON.stringify(sub.toJSON()));
-          setStateValue('userAgent',navigator.userAgent);
-          setTriggerValue('saveRequest',Date.now());
-          button.disabled=false;
-          button.textContent='✅ Известията са активни';
-          status.textContent='Устройството е регистрирано.';
-        }catch(err){finishError(err);}
-      };
-      refresh();
+      later.onclick=()=>{overlay.hidden=true;};
+      boot().catch(()=>{});
     }
     """,
 )
+
 def render_push_opt_in(user):
     if not browser_push_ready():
-        st.sidebar.warning("Push известията не са конфигурирани.")
         return
-    component_key=f"push_opt_in_{user['id']}"
-    with st.sidebar.expander("📲 Известия на телефона",expanded=False):
-        result=PUSH_COMPONENT(
-            data={"publicKey":VAPID_PUBLIC_KEY},
-            default={"subscription":"","userAgent":"","saveRequest":None,"reRegister":None},
-            key=component_key,
-            on_subscription_change=lambda: None,
-            on_userAgent_change=lambda: None,
-            on_saveRequest_change=lambda: None,
-            on_reRegister_change=lambda: None,
-        )
-        component_state=st.session_state.get(component_key,{}) or {}
-        raw=(getattr(result,"subscription","") or component_state.get("subscription") or "")
-        user_agent=(getattr(result,"userAgent","") or component_state.get("userAgent") or None)
-        if raw:
-            try:
-                subscription=json.loads(raw)
-                endpoint=subscription.get("endpoint","")
-                if not endpoint:
-                    raise ValueError("Липсва browser endpoint.")
-                fingerprint=hashlib.sha256(endpoint.encode()).hexdigest()
-                state_key=f"saved_push_{user['id']}"
-                existing=fetchone("SELECT id FROM push_subscriptions WHERE academy_id=%s AND user_id=%s AND endpoint=%s AND active",(ACADEMY_ID,user["id"],endpoint))
-                if not existing or st.session_state.get(state_key)!=fingerprint:
-                    if save_push_subscription(user["id"],subscription,user_agent):
-                        execute("UPDATE push_subscriptions SET active=FALSE,updated_at=NOW() WHERE academy_id=%s AND user_id=%s AND endpoint<>%s AND active",(ACADEMY_ID,user["id"],endpoint))
-                        st.session_state[state_key]=fingerprint
-                        st.success("✅ Устройството е записано към профила.")
-            except Exception as exc:
-                st.error(f"Абонаментът не може да бъде записан: {exc}")
-        saved_devices=fetchone("SELECT COUNT(*) c FROM push_subscriptions WHERE academy_id=%s AND user_id=%s AND active",(ACADEMY_ID,user["id"]))
-        saved_count=int(saved_devices["c"] if saved_devices else 0)
-        if saved_count:
-            st.success(f"✅ Записани устройства: {saved_count}")
-        else:
-            st.warning("⚠️ Устройството още не е записано към профила.")
-        if st.button("🧪 Изпрати тестово Push",key=f"test_push_{user['id']}",use_container_width=True,disabled=saved_count==0):
-            push_result=send_browser_push(user["id"],"Dyulgerov Academy","Тестовото Push известие работи успешно.",return_details=True)
-            if push_result["sent"]:st.success(f"✅ Изпратено успешно към {push_result['sent']} от {push_result['attempted']} устройство/а.")
-            else:st.error(f"❌ Push не е изпратен. Опити: {push_result['attempted']}.")
-            for push_error in push_result["errors"]:st.code(push_error,language=None)
+    component_key=f"push_auto_{user['id']}"
+    result=PUSH_COMPONENT(
+        data={"publicKey":VAPID_PUBLIC_KEY},
+        default={"subscription":"","userAgent":"","saveRequest":None},
+        key=component_key,
+        on_subscription_change=lambda: None,
+        on_userAgent_change=lambda: None,
+        on_saveRequest_change=lambda: None,
+        height=0,
+    )
+    component_state=st.session_state.get(component_key,{}) or {}
+    raw=(getattr(result,"subscription","") or component_state.get("subscription") or "")
+    user_agent=(getattr(result,"userAgent","") or component_state.get("userAgent") or None)
+    if not raw:
+        return
+    try:
+        subscription=json.loads(raw)
+        endpoint=subscription.get("endpoint","")
+        if not endpoint:
+            return
+        fingerprint=hashlib.sha256(endpoint.encode()).hexdigest()
+        state_key=f"saved_push_{user['id']}"
+        existing=fetchone("SELECT id FROM push_subscriptions WHERE academy_id=%s AND user_id=%s AND endpoint=%s AND active",(ACADEMY_ID,user["id"],endpoint))
+        if not existing or st.session_state.get(state_key)!=fingerprint:
+            if save_push_subscription(user["id"],subscription,user_agent):
+                execute("UPDATE push_subscriptions SET active=FALSE,updated_at=NOW() WHERE academy_id=%s AND user_id=%s AND endpoint<>%s AND active",(ACADEMY_ID,user["id"],endpoint))
+                st.session_state[state_key]=fingerprint
+    except Exception:
+        pass
 
 def render_app():
     user = current_user()
