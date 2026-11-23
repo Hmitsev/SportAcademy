@@ -4161,6 +4161,11 @@ def logout_button():
         st.query_params.clear()
         st.rerun()
 
+def render_push_opt_in(user):
+    # Safe compatibility function. Browser push opt-in is not activated yet.
+    # Keeping this function prevents the existing render_app() call from crashing.
+    return None
+
 def render_app():
     user = current_user()
 
