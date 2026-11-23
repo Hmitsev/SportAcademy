@@ -1,6 +1,6 @@
-1. Replace only app.py in GitHub.
-2. Do NOT upload RENDER_NEW_VAPID_KEYS_PRIVATE.txt to GitHub.
-3. Open that private TXT locally and replace VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY in Render.
+1. Upload only app.py to GitHub.
+2. Open PRIVATE_RENDER_KEYS.txt locally. Never upload that file to GitHub.
+3. In Render Environment replace VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY with the new one-line values.
 4. Keep VAPID_SUBJECT=mailto:hmitsevapps@gmail.com.
 5. Save, rebuild and deploy.
-6. Open each device profile and activate notifications again once. Old subscriptions are deactivated automatically when the public key changes.
+6. Open Push settings on the device and activate again. The app detects the new public key and deactivates old subscriptions.
