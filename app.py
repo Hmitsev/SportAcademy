@@ -4244,7 +4244,13 @@ def render_push_opt_in(user):
         st.sidebar.warning("Push известията не са конфигурирани.")
         return
     with st.sidebar.expander("📲 Известия на телефона",expanded=False):
-        result=PUSH_COMPONENT(data={"publicKey":VAPID_PUBLIC_KEY},default={"subscription":"","userAgent":""},key=f"push_opt_in_{user['id']}")
+        result=PUSH_COMPONENT(
+            data={"publicKey":VAPID_PUBLIC_KEY},
+            default={"subscription":"","userAgent":""},
+            key=f"push_opt_in_{user['id']}",
+            on_subscription_change=lambda: None,
+            on_userAgent_change=lambda: None,
+        )
         raw=getattr(result,"subscription","") or ""
         if raw:
             try:
