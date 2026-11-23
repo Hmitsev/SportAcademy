@@ -4,6 +4,7 @@ import base64
 import hashlib
 import secrets
 import time
+import json
 import pandas as pd
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
@@ -15,12 +16,16 @@ from psycopg2.extras import RealDictCursor
 from psycopg2.pool import ThreadedConnectionPool
 import streamlit as st
 from PIL import Image, ImageDraw, ImageFont, ImageOps
+from pywebpush import webpush, WebPushException
 
 APP_DIR = Path(__file__).parent
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 ACADEMY_SLUG = os.getenv("ACADEMY_SLUG", "dyulgerov-academy")
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "admin@academy.local").strip().lower()
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "ChangeMe123!")
+VAPID_PUBLIC_KEY = os.getenv("VAPID_PUBLIC_KEY", "").strip()
+VAPID_PRIVATE_KEY = os.getenv("VAPID_PRIVATE_KEY", "").replace("\\n", "\n").strip()
+VAPID_SUBJECT = os.getenv("VAPID_SUBJECT", "mailto:hmitsevapps@gmail.com").strip()
 ASSETS = {
     "logo": APP_DIR / "лого.jpg",
     "background": APP_DIR / "беграуд.jpg",
@@ -594,6 +599,12 @@ def init_db():
           sender_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL, body TEXT,
           file_name TEXT, file_mime TEXT, file_data BYTEA, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""",
       """CREATE INDEX IF NOT EXISTS idx_staff_chat_created ON staff_chat_messages(academy_id,created_at DESC)""",
+      """CREATE TABLE IF NOT EXISTS push_subscriptions(
+          id BIGSERIAL PRIMARY KEY,academy_id BIGINT NOT NULL REFERENCES academies(id) ON DELETE CASCADE,
+          user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,endpoint TEXT NOT NULL UNIQUE,
+          p256dh TEXT NOT NULL,auth TEXT NOT NULL,user_agent TEXT,active BOOLEAN NOT NULL DEFAULT TRUE,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""",
+      """CREATE INDEX IF NOT EXISTS idx_push_subscriptions_user ON push_subscriptions(academy_id,user_id,active)""",
     ]
     with db() as conn, conn.cursor() as cur:
         for sql in statements: cur.execute(sql)
@@ -1232,12 +1243,39 @@ def current_user():
         st.query_params["session"] = token
     return session
 
-def create_notification(user_id, notification_type, title, body=""):
-    execute(
-        "INSERT INTO notifications(academy_id,user_id,notification_type,title,body) VALUES(%s,%s,%s,%s,%s)",
-        (ACADEMY_ID, user_id, notification_type, title, body),
-    )
+def browser_push_ready():
+    return bool(VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY and VAPID_SUBJECT)
 
+def save_push_subscription(user_id, subscription, user_agent=None):
+    if not isinstance(subscription, dict): return False
+    keys=subscription.get("keys") or {}
+    if not subscription.get("endpoint") or not keys.get("p256dh") or not keys.get("auth"): return False
+    execute("""INSERT INTO push_subscriptions(academy_id,user_id,endpoint,p256dh,auth,user_agent,active,updated_at)
+               VALUES(%s,%s,%s,%s,%s,%s,TRUE,NOW())
+               ON CONFLICT(endpoint) DO UPDATE SET user_id=EXCLUDED.user_id,p256dh=EXCLUDED.p256dh,
+               auth=EXCLUDED.auth,user_agent=EXCLUDED.user_agent,active=TRUE,updated_at=NOW()""",
+            (ACADEMY_ID,user_id,subscription["endpoint"],keys["p256dh"],keys["auth"],user_agent))
+    return True
+
+def send_browser_push(user_id,title,body=""):
+    if not browser_push_ready() or not user_id:return 0
+    rows=fetchall("SELECT id,endpoint,p256dh,auth FROM push_subscriptions WHERE academy_id=%s AND user_id=%s AND active",(ACADEMY_ID,user_id))
+    payload=json.dumps({"title":title,"body":body or "Имате ново известие от Dyulgerov Academy.","url":"/"},ensure_ascii=False)
+    sent=0
+    for row in rows:
+        try:
+            webpush(subscription_info={"endpoint":row["endpoint"],"keys":{"p256dh":row["p256dh"],"auth":row["auth"]}},data=payload,vapid_private_key=VAPID_PRIVATE_KEY,vapid_claims={"sub":VAPID_SUBJECT},ttl=300)
+            sent+=1
+        except WebPushException as exc:
+            if getattr(getattr(exc,"response",None),"status_code",None) in (404,410):
+                execute("UPDATE push_subscriptions SET active=FALSE,updated_at=NOW() WHERE id=%s",(row["id"],))
+        except Exception:
+            pass
+    return sent
+
+def create_notification(user_id, notification_type, title, body=""):
+    execute("INSERT INTO notifications(academy_id,user_id,notification_type,title,body) VALUES(%s,%s,%s,%s,%s)",(ACADEMY_ID,user_id,notification_type,title,body))
+    send_browser_push(user_id,title,body)
 
 def unread_notification_count(user_id):
     row = fetchone(
@@ -4161,10 +4199,67 @@ def logout_button():
         st.query_params.clear()
         st.rerun()
 
+PUSH_COMPONENT = st.components.v2.component(
+    "dyulgerov_push_opt_in",
+    html="""<div class="push-box"><button type="button" id="push-enable">🔔 Активирай известия</button><span id="push-status"></span></div>""",
+    css=""".push-box{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.push-box button{background:linear-gradient(135deg,#956b20,#d1ad57);color:white;border:1px solid #e2c777;border-radius:10px;padding:10px 14px;font-weight:800;cursor:pointer}.push-box span{font-size:.86rem;color:var(--st-text-color)}""",
+    js="""
+    export default function(component) {
+      const {parentElement,data,setStateValue}=component;
+      const button=parentElement.querySelector('#push-enable');
+      const status=parentElement.querySelector('#push-status');
+      const decodeKey=(value)=>{
+        const padding='='.repeat((4-value.length%4)%4);
+        const raw=atob((value+padding).replace(/-/g,'+').replace(/_/g,'/'));
+        return Uint8Array.from([...raw].map(c=>c.charCodeAt(0)));
+      };
+      const refresh=async()=>{
+        if(!('serviceWorker' in navigator)||!('PushManager' in window)){button.disabled=true;status.textContent='Този браузър не поддържа Web Push.';return;}
+        if(Notification.permission==='denied'){button.disabled=true;status.textContent='Известията са блокирани от настройките на браузъра.';return;}
+        const reg=await navigator.serviceWorker.getRegistration('/app/static/');
+        const sub=reg?await reg.pushManager.getSubscription():null;
+        if(sub){button.textContent='✅ Известията са активни';status.textContent='Това устройство е регистрирано.';setStateValue('subscription',JSON.stringify(sub.toJSON()));}
+      };
+      button.onclick=async()=>{
+        try{
+          status.textContent='Активиране...';
+          const permission=await Notification.requestPermission();
+          if(permission!=='granted'){status.textContent='Разрешението не е дадено.';return;}
+          const reg=await navigator.serviceWorker.register('/app/static/service-worker.js',{scope:'/app/static/'});
+          await navigator.serviceWorker.ready;
+          let sub=await reg.pushManager.getSubscription();
+          if(!sub)sub=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:decodeKey(data.publicKey)});
+          setStateValue('subscription',JSON.stringify(sub.toJSON()));
+          setStateValue('userAgent',navigator.userAgent);
+          button.textContent='✅ Известията са активни';status.textContent='Устройството е регистрирано.';
+        }catch(err){status.textContent='Грешка: '+(err?.message||String(err));}
+      };
+      refresh().catch(()=>{});
+    }
+    """,
+)
+
 def render_push_opt_in(user):
-    # Safe compatibility function. Browser push opt-in is not activated yet.
-    # Keeping this function prevents the existing render_app() call from crashing.
-    return None
+    if not browser_push_ready():
+        st.sidebar.warning("Push известията не са конфигурирани.")
+        return
+    with st.sidebar.expander("📲 Известия на телефона",expanded=False):
+        result=PUSH_COMPONENT(data={"publicKey":VAPID_PUBLIC_KEY},default={"subscription":"","userAgent":""},key=f"push_opt_in_{user['id']}")
+        raw=getattr(result,"subscription","") or ""
+        if raw:
+            try:
+                subscription=json.loads(raw)
+                fingerprint=hashlib.sha256(subscription.get("endpoint","").encode()).hexdigest()
+                state_key=f"saved_push_{user['id']}"
+                if st.session_state.get(state_key)!=fingerprint and save_push_subscription(user["id"],subscription,getattr(result,"userAgent","") or None):
+                    st.session_state[state_key]=fingerprint
+                    st.success("✅ Известията са активирани за това устройство.")
+            except Exception:
+                st.error("Абонаментът за известия не може да бъде записан.")
+        if st.button("🧪 Изпрати тестово Push",key=f"test_push_{user['id']}",use_container_width=True):
+            sent=send_browser_push(user["id"],"Dyulgerov Academy","Тестовото Push известие работи успешно.")
+            if sent:st.success(f"✅ Изпратено към {sent} устройство/а.")
+            else:st.warning("Първо активирай известията на това устройство.")
 
 def render_app():
     user = current_user()
