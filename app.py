@@ -4200,45 +4200,70 @@ def logout_button():
         st.rerun()
 
 PUSH_COMPONENT = st.components.v2.component(
-    "dyulgerov_push_opt_in",
+    "dyulgerov_push_opt_in_v3",
     html="""<div class="push-box"><button type="button" id="push-enable">🔔 Активирай известия</button><span id="push-status"></span></div>""",
-    css=""".push-box{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.push-box button{background:linear-gradient(135deg,#956b20,#d1ad57);color:white;border:1px solid #e2c777;border-radius:10px;padding:10px 14px;font-weight:800;cursor:pointer}.push-box span{font-size:.86rem;color:var(--st-text-color)}""",
+    css=""".push-box{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.push-box button{background:linear-gradient(135deg,#956b20,#d1ad57);color:white;border:1px solid #e2c777;border-radius:10px;padding:10px 14px;font-weight:800;cursor:pointer}.push-box button:disabled{opacity:.55;cursor:wait}.push-box span{font-size:.86rem;color:var(--st-text-color)}""",
     js="""
     export default function(component) {
       const {parentElement,data,setStateValue}=component;
       const button=parentElement.querySelector('#push-enable');
       const status=parentElement.querySelector('#push-status');
+      const withTimeout=(promise,ms,label)=>Promise.race([
+        promise,
+        new Promise((_,reject)=>setTimeout(()=>reject(new Error(label+' не отговори до '+Math.round(ms/1000)+' сек.')),ms))
+      ]);
       const decodeKey=(value)=>{
         const padding='='.repeat((4-value.length%4)%4);
         const raw=atob((value+padding).replace(/-/g,'+').replace(/_/g,'/'));
         return Uint8Array.from([...raw].map(c=>c.charCodeAt(0)));
       };
+      const finishError=(err)=>{
+        button.disabled=false;
+        button.textContent='🔔 Опитай отново';
+        status.textContent='Грешка: '+(err?.message||String(err));
+      };
       const refresh=async()=>{
-        if(!('serviceWorker' in navigator)||!('PushManager' in window)){button.disabled=true;status.textContent='Този браузър не поддържа Web Push.';return;}
-        if(Notification.permission==='denied'){button.disabled=true;status.textContent='Известията са блокирани от настройките на браузъра.';return;}
-        const reg=await navigator.serviceWorker.getRegistration('/app/static/');
-        const sub=reg?await reg.pushManager.getSubscription():null;
-        if(sub){button.textContent='✅ Известията са активни';status.textContent='Това устройство е регистрирано.';setStateValue('subscription',JSON.stringify(sub.toJSON()));}
+        try{
+          if(!('serviceWorker' in navigator)||!('PushManager' in window)){button.disabled=true;status.textContent='Този браузър не поддържа Web Push.';return;}
+          if(Notification.permission==='denied'){button.disabled=true;status.textContent='Известията са блокирани от настройките на браузъра.';return;}
+          const reg=await withTimeout(navigator.serviceWorker.getRegistration('/app/static/'),5000,'Проверката на Service Worker');
+          const sub=reg?await withTimeout(reg.pushManager.getSubscription(),5000,'Проверката на Push абонамента'):null;
+          if(sub){button.textContent='✅ Известията са активни';status.textContent='Това устройство е регистрирано.';setStateValue('subscription',JSON.stringify(sub.toJSON()));setStateValue('userAgent',navigator.userAgent);}
+        }catch(err){/* refresh must never block the UI */}
       };
       button.onclick=async()=>{
+        button.disabled=true;
         try{
-          status.textContent='Активиране...';
-          const permission=await Notification.requestPermission();
-          if(permission!=='granted'){status.textContent='Разрешението не е дадено.';return;}
-          const reg=await navigator.serviceWorker.register('/app/static/service-worker.js',{scope:'/app/static/'});
-          await navigator.serviceWorker.ready;
-          let sub=await reg.pushManager.getSubscription();
-          if(!sub)sub=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:decodeKey(data.publicKey)});
+          status.textContent='1/3 Разрешение от браузъра...';
+          const permission=Notification.permission==='granted'?'granted':await withTimeout(Notification.requestPermission(),15000,'Разрешението за известия');
+          if(permission!=='granted')throw new Error('Разрешението за известия не е дадено.');
+
+          status.textContent='2/3 Регистрация на Service Worker...';
+          const reg=await withTimeout(
+            navigator.serviceWorker.register('/app/static/service-worker.js',{scope:'/app/static/',updateViaCache:'none'}),
+            10000,
+            'Регистрацията на Service Worker'
+          );
+          await withTimeout(reg.update().catch(()=>null),5000,'Обновяването на Service Worker');
+          let activeReg=reg;
+          if(!(reg.active||reg.waiting||reg.installing))throw new Error('Service Worker не е активен.');
+
+          status.textContent='3/3 Създаване на Push абонамент...';
+          let sub=await withTimeout(activeReg.pushManager.getSubscription(),5000,'Проверката на Push абонамента');
+          if(!sub){
+            sub=await withTimeout(activeReg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:decodeKey(data.publicKey)}),15000,'Push абонаментът');
+          }
           setStateValue('subscription',JSON.stringify(sub.toJSON()));
           setStateValue('userAgent',navigator.userAgent);
-          button.textContent='✅ Известията са активни';status.textContent='Устройството е регистрирано.';
-        }catch(err){status.textContent='Грешка: '+(err?.message||String(err));}
+          button.disabled=false;
+          button.textContent='✅ Известията са активни';
+          status.textContent='Устройството е регистрирано.';
+        }catch(err){finishError(err);}
       };
-      refresh().catch(()=>{});
+      refresh();
     }
     """,
 )
-
 def render_push_opt_in(user):
     if not browser_push_ready():
         st.sidebar.warning("Push известията не са конфигурирани.")
