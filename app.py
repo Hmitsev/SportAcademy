@@ -3286,9 +3286,9 @@ def multi_date_event_form(form_key, teams, user_id, fixed_team_id=None, event_mo
         player_name_by_id={p["id"]:f"{p['first_name']} {p['last_name']}" for p in team_players}
         all_children=st.checkbox("✅ Графикът е за всички деца от набора",True,key=f"{form_key}_training_all_children")
         if all_children:
-            st.caption(f"Маркирани са всички {len(team_players)} деца от набора за всеки създаден ден и час.")
+            st.success(f"Стандартен график: един час за избран ден и всички {len(team_players)} деца от набора.")
         else:
-            st.info("За всеки ден и всеки отделен час избери кои деца да присъстват. Всички деца са маркирани по подразбиране и можеш да отмаркираш ненужните.")
+            st.info("Разделен график: за всеки ден и всеки отделен час избери децата. Всички са маркирани по подразбиране и отмаркираш само тези, които няма да идват.")
         title = st.text_input(
             "Заглавие",
             value="Тренировка",
@@ -3332,22 +3332,27 @@ def multi_date_event_form(form_key, teams, user_id, fixed_team_id=None, event_mo
             key=f"{form_key}_weekdays",
         )
 
-        st.markdown("### 2. Задай час и деца за всеки избран ден")
+        st.markdown("### 2. Задай стандартен час за всеки избран ден" if all_children else "### 2. Задай часове и деца за всеки избран ден")
         day_slots = {}
         if selected_days:
             for day_name in selected_days:
                 day_number=weekday_options[day_name]
                 st.markdown(f"#### {day_name}")
-                add_second_time=st.checkbox(
-                    f"➕ Добави втори час за {day_name}",
-                    key=f"{form_key}_second_time_{day_number}",
-                )
+                if all_children:
+                    add_second_time=False
+                    st.caption("Стандартен график: един час за всички деца от набора.")
+                else:
+                    add_second_time=st.checkbox(
+                        f"➕ Добави втори час за {day_name}",
+                        key=f"{form_key}_second_time_{day_number}",
+                        help="Включи само ако в същия ден има втора група в различен час.",
+                    )
                 slot_count=2 if add_second_time else 1
                 day_slots[day_name]=[]
                 slot_columns=st.columns(slot_count)
                 for slot_index in range(slot_count):
                     with slot_columns[slot_index]:
-                        slot_label="Първи час" if slot_index==0 else "Втори час"
+                        slot_label=("Час" if all_children else ("Първи час" if slot_index==0 else "Втори час"))
                         default_time="18:30" if slot_index==0 else "19:30"
                         event_time=st.time_input(
                             slot_label,
@@ -3404,7 +3409,7 @@ def multi_date_event_form(form_key, teams, user_id, fixed_team_id=None, event_mo
         elif schedule:
             st.info(f"Ще бъдат създадени {len(schedule)} тренировки.")
             with st.expander("Покажи всички дати", expanded=len(schedule) <= 10):
-                for event_date, event_time, day_name in schedule:
+                for event_date, event_time, day_name, slot_player_ids in schedule:
                     preview_dt=datetime.combine(event_date,event_time)
                     st.markdown("✅ "+training_datetime_html(preview_dt),unsafe_allow_html=True)
 
