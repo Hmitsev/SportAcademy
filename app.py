@@ -3887,7 +3887,7 @@ def admin_panel(user):
         vals = [
             fetchone("SELECT COUNT(*) c FROM users WHERE academy_id=%s AND account_status='pending'", (ACADEMY_ID,))["c"],
             fetchone("SELECT COUNT(*) c FROM players WHERE academy_id=%s AND approval_status='pending'", (ACADEMY_ID,))["c"],
-            fetchone("SELECT COUNT(*) c FROM teams WHERE academy_id=%s AND active", (ACADEMY_ID,))["c"],
+            fetchone("""SELECT COUNT(DISTINCT t.id) c FROM teams t JOIN coach_teams ct ON ct.team_id=t.id AND ct.academy_id=t.academy_id JOIN coaches c ON c.id=ct.coach_id AND c.academy_id=ct.academy_id WHERE t.academy_id=%s AND t.active AND c.active""", (ACADEMY_ID,))["c"],
         ]
         for col, label, value in zip(st.columns(3), ["Чакащи родители", "Чакащи деца", "Активни набори"], vals):
             col.metric(label, value)
@@ -4310,8 +4310,7 @@ def coach_panel(user):
     if sec == "Табло":
         render_all_academy_birthday_banners()
         players=fetchall("SELECT * FROM players WHERE academy_id=%s AND team_id=%s AND approval_status='approved' AND active ORDER BY first_name,last_name",(ACADEMY_ID,team["id"]))
-        events=fetchone("SELECT COUNT(*) c FROM events WHERE academy_id=%s AND team_id=%s AND starts_at>=NOW()",(ACADEMY_ID,team["id"]))["c"]
-        c1,c2=st.columns(2); c1.metric("Деца в групата",len(players)); c2.metric("Предстоящи събития",events)
+        st.metric("Деца в групата",len(players))
         st.divider(); st.subheader("⚽ Играч")
         for player in players:
             with st.container(border=True): player_card(player,position_edit=True,key_prefix=f"coach_{team['id']}")
