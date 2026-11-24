@@ -879,6 +879,28 @@ def run_clean_rollout_reset():
 try:_retry_db_call(run_clean_rollout_reset,attempts=3)
 except (psycopg2.OperationalError,psycopg2.InterfaceError):pass
 
+# --- ONE-TIME TRAINING CUTOFF: DECEMBER 22, 2026 ---------------------------
+TRAINING_DECEMBER_CUTOFF_KEY = "training_cutoff_after_2026_12_22_v1"
+def run_one_time_training_december_cutoff():
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("""CREATE TABLE IF NOT EXISTS app_migrations(
+            migration_key TEXT PRIMARY KEY,
+            applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
+        cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (TRAINING_DECEMBER_CUTOFF_KEY,))
+        cur.execute("SELECT 1 FROM app_migrations WHERE migration_key=%s", (TRAINING_DECEMBER_CUTOFF_KEY,))
+        if cur.fetchone():
+            return False
+        cur.execute("""DELETE FROM events
+            WHERE academy_id=%s AND event_type='training'
+              AND starts_at >= TIMESTAMPTZ '2026-12-23 00:00:00+02'
+              AND starts_at < TIMESTAMPTZ '2027-01-01 00:00:00+02'""", (ACADEMY_ID,))
+        cur.execute("INSERT INTO app_migrations(migration_key) VALUES(%s)", (TRAINING_DECEMBER_CUTOFF_KEY,))
+        return True
+try:
+    _retry_db_call(run_one_time_training_december_cutoff, attempts=3)
+except (psycopg2.OperationalError, psycopg2.InterfaceError):
+    pass
+
 # --- ONE-TIME RESET: TEAM 2017 MATCH HISTORY AND COACH MESSAGES ------------
 # Clears only completed match history and coach-to-parent messages for birth year 2017.
 # Upcoming matches, training schedules, players, fees and all other teams remain intact.
