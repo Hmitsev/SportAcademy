@@ -3282,12 +3282,13 @@ def multi_date_event_form(form_key, teams, user_id, fixed_team_id=None, event_mo
             team_id = fixed_team_id
 
         team_players=fetchall("SELECT id,first_name,last_name FROM players WHERE academy_id=%s AND team_id=%s AND approval_status='approved' AND active ORDER BY first_name,last_name",(ACADEMY_ID,team_id))
+        all_player_ids=[p["id"] for p in team_players]
+        player_name_by_id={p["id"]:f"{p['first_name']} {p['last_name']}" for p in team_players}
         all_children=st.checkbox("✅ Графикът е за всички деца от набора",True,key=f"{form_key}_training_all_children")
-        selected_player_ids=[p["id"] for p in team_players]
-        if not all_children:
-            selected_player_ids=st.multiselect("Избери едно или повече деца",[p["id"] for p in team_players],format_func=lambda pid:next(f"{p['first_name']} {p['last_name']}" for p in team_players if p["id"]==pid),key=f"{form_key}_selected_players")
-            if not selected_player_ids:st.warning("Избери поне едно дете.")
-        else:st.caption(f"Маркирани са всички {len(team_players)} деца от набора.")
+        if all_children:
+            st.caption(f"Маркирани са всички {len(team_players)} деца от набора за всеки създаден ден и час.")
+        else:
+            st.info("За всеки ден и всеки отделен час избери кои деца да присъстват. Всички деца са маркирани по подразбиране и можеш да отмаркираш ненужните.")
         title = st.text_input(
             "Заглавие",
             value="Тренировка",
@@ -3331,16 +3332,42 @@ def multi_date_event_form(form_key, teams, user_id, fixed_team_id=None, event_mo
             key=f"{form_key}_weekdays",
         )
 
-        st.markdown("### 2. Задай час за всеки избран ден")
-        day_times = {}
+        st.markdown("### 2. Задай час и деца за всеки избран ден")
+        day_slots = {}
         if selected_days:
-            time_columns = st.columns(2)
-            for index, day_name in enumerate(selected_days):
-                day_times[day_name] = time_columns[index % 2].time_input(
-                    day_name,
-                    value=datetime.strptime("18:30", "%H:%M").time(),
-                    key=f"{form_key}_time_{weekday_options[day_name]}",
+            for day_name in selected_days:
+                day_number=weekday_options[day_name]
+                st.markdown(f"#### {day_name}")
+                add_second_time=st.checkbox(
+                    f"➕ Добави втори час за {day_name}",
+                    key=f"{form_key}_second_time_{day_number}",
                 )
+                slot_count=2 if add_second_time else 1
+                day_slots[day_name]=[]
+                slot_columns=st.columns(slot_count)
+                for slot_index in range(slot_count):
+                    with slot_columns[slot_index]:
+                        slot_label="Първи час" if slot_index==0 else "Втори час"
+                        default_time="18:30" if slot_index==0 else "19:30"
+                        event_time=st.time_input(
+                            slot_label,
+                            value=datetime.strptime(default_time,"%H:%M").time(),
+                            key=f"{form_key}_time_{day_number}_{slot_index}",
+                        )
+                        if all_children:
+                            slot_player_ids=list(all_player_ids)
+                        else:
+                            slot_player_ids=st.multiselect(
+                                f"Деца за {day_name}, {event_time:%H:%M}",
+                                all_player_ids,
+                                default=all_player_ids,
+                                format_func=lambda pid:player_name_by_id[pid],
+                                key=f"{form_key}_players_{day_number}_{slot_index}",
+                            )
+                            if not slot_player_ids:
+                                st.warning("За този час няма избрано дете и тренировката няма да бъде създадена.")
+                        day_slots[day_name].append({"time":event_time,"player_ids":slot_player_ids})
+                st.divider()
         else:
             st.info("Първо избери тренировъчните дни.")
 
@@ -3363,9 +3390,11 @@ def multi_date_event_form(form_key, teams, user_id, fixed_team_id=None, event_mo
             while current_date <= end_date:
                 for day_name in selected_days:
                     if current_date.weekday() == weekday_options[day_name]:
-                        schedule.append((current_date, day_times[day_name], day_name))
+                        for slot in day_slots.get(day_name,[]):
+                            if slot["player_ids"]:
+                                schedule.append((current_date,slot["time"],day_name,slot["player_ids"]))
                 current_date += timedelta(days=1)
-            schedule.sort(key=lambda item: (item[0], item[1]))
+            schedule.sort(key=lambda item:(item[0],item[1]))
 
         st.markdown("### 4. Преглед на графика")
         if end_date < start_date:
@@ -3384,7 +3413,7 @@ def multi_date_event_form(form_key, teams, user_id, fixed_team_id=None, event_mo
             key=f"{form_key}_save_training_schedule",
             use_container_width=True,
             type="primary",
-            disabled=not schedule or (not all_children and not selected_player_ids),
+            disabled=not schedule,
         ):
             if not title.strip():
                 st.error("Въведи заглавие.")
@@ -3395,13 +3424,18 @@ def multi_date_event_form(form_key, teams, user_id, fixed_team_id=None, event_mo
             else:
                 with db() as conn,conn.cursor() as cur:
                     if all_children:cur.execute("DELETE FROM events WHERE academy_id=%s AND team_id=%s AND event_type='training'",(ACADEMY_ID,team_id))
-                    else:cur.execute("""DELETE FROM events e WHERE e.academy_id=%s AND e.team_id=%s AND e.event_type='training' AND e.starts_at::date BETWEEN %s AND %s AND EXISTS(SELECT 1 FROM event_players ep WHERE ep.event_id=e.id AND ep.player_id=ANY(%s))""",(ACADEMY_ID,team_id,start_date,end_date,selected_player_ids))
-                    for event_date,event_time,_ in schedule:
-                        cur.execute("""INSERT INTO events(academy_id,team_id,event_type,title,starts_at,location,description,created_by,target_all_players) VALUES(%s,%s,'training',%s,%s,%s,%s,%s,%s) RETURNING id""",(ACADEMY_ID,team_id,title.strip(),datetime.combine(event_date,event_time),location.strip() or None,description.strip() or None,user_id,all_children));event_id=cur.fetchone()[0]
-                        if not all_children:
-                            for pid in selected_player_ids:cur.execute("INSERT INTO event_players(academy_id,event_id,player_id) VALUES(%s,%s,%s)",(ACADEMY_ID,event_id,pid))
+                    else:
+                        cur.execute("DELETE FROM events WHERE academy_id=%s AND team_id=%s AND event_type='training' AND starts_at::date BETWEEN %s AND %s",(ACADEMY_ID,team_id,start_date,end_date))
+                    notified_player_ids=set()
+                    for event_date,event_time,_,slot_player_ids in schedule:
+                        target_all=all_children and set(slot_player_ids)==set(all_player_ids)
+                        cur.execute("""INSERT INTO events(academy_id,team_id,event_type,title,starts_at,location,description,created_by,target_all_players) VALUES(%s,%s,'training',%s,%s,%s,%s,%s,%s) RETURNING id""",(ACADEMY_ID,team_id,title.strip(),datetime.combine(event_date,event_time),location.strip() or None,description.strip() or None,user_id,target_all));event_id=cur.fetchone()[0]
+                        if not target_all:
+                            for pid in slot_player_ids:
+                                cur.execute("INSERT INTO event_players(academy_id,event_id,player_id) VALUES(%s,%s,%s)",(ACADEMY_ID,event_id,pid))
+                                notified_player_ids.add(pid)
                 notice=f"{len(schedule)} тренировки за {start_date:%d.%m.%Y} - {end_date:%d.%m.%Y}."
-                notified=notify_team_parents(team_id,"training_schedule","Нов тренировъчен график",notice) if all_children else notify_selected_players_parents(selected_player_ids,"training_schedule","Индивидуален тренировъчен график",notice)
+                notified=notify_team_parents(team_id,"training_schedule","Нов тренировъчен график",notice) if all_children else notify_selected_players_parents(list(notified_player_ids),"training_schedule","График по групи и часове",notice)
                 set_flash(f"✅ Графикът е публикуван. Уведомени родители: {notified}.");st.rerun()
 
     else:
@@ -4300,6 +4334,33 @@ def coach_panel(user):
                 mmap = {f"{m['starts_at']:%d.%m.%Y %H:%M} · {m['title']}": m for m in matches}
                 match_label = st.selectbox("Избери мач", list(mmap), key="squad_match")
                 match = mmap[match_label]
+                with st.expander("🗑️ Изтриване на погрешно създаден мач", expanded=False):
+                    st.warning("Изтриването е окончателно. Ще бъдат премахнати мачът, групата, анкетата, присъствията и прикаченият плакат за този мач.")
+                    delete_match_confirm = st.checkbox(
+                        f"Потвърждавам изтриването на: {match_label}",
+                        key=f"delete_match_confirm_{match['id']}",
+                    )
+                    if st.button(
+                        "🗑️ Изтрий този мач",
+                        key=f"delete_match_{match['id']}",
+                        use_container_width=True,
+                        disabled=not delete_match_confirm,
+                    ):
+                        with db() as conn, conn.cursor() as cur:
+                            # Keep bell cleanup scoped to notifications connected with this match flow.
+                            cur.execute(
+                                "DELETE FROM notifications WHERE academy_id=%s AND notification_type IN ('match','match_squad','match_result') AND body LIKE %s",
+                                (ACADEMY_ID, f"%{match['title']}%"),
+                            )
+                            # All direct match records (squad, poll, attendance, poster, stats etc.)
+                            # are removed through the event foreign keys with ON DELETE CASCADE.
+                            cur.execute(
+                                "DELETE FROM events WHERE academy_id=%s AND team_id=%s AND id=%s AND event_type='match'",
+                                (ACADEMY_ID, team["id"], match["id"]),
+                            )
+                        st.session_state.pop(f"squad_sent_{match['id']}", None)
+                        set_flash("✅ Погрешно създаденият мач е изтрит окончателно.")
+                        st.rerun()
                 players = fetchall(
                     "SELECT * FROM players WHERE academy_id=%s AND team_id=%s AND approval_status='approved' AND active ORDER BY first_name,last_name",
                     (ACADEMY_ID, team["id"]),
@@ -4356,8 +4417,8 @@ def coach_panel(user):
     elif sec == "Упражнения":
         coach_exercises_panel()
     elif sec == "Присъствие":
-        events = fetchall("SELECT * FROM events WHERE academy_id=%s AND team_id=%s ORDER BY starts_at DESC LIMIT 40", (ACADEMY_ID, team["id"]))
-        if not events: st.info("Първо създай тренировка или мач.")
+        events = fetchall("SELECT * FROM events WHERE academy_id=%s AND team_id=%s AND starts_at >= NOW() AND status <> 'cancelled' ORDER BY starts_at ASC LIMIT 40", (ACADEMY_ID, team["id"]))
+        if not events: st.info("Няма предстоящи тренировки или мачове за отразяване.")
         else:
             emap = {f"{e['starts_at']:%d.%m.%Y %H:%M} · {e['title']}": e for e in events}
             event_labels = st.multiselect(
