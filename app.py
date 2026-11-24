@@ -2530,7 +2530,7 @@ def render_registration_children(parent_user_id):
         st.write(f"• {child['first_name']} {child['last_name']} · 🎂 {birth_text} · {child.get('team_name') or 'Без набор'}")
 
 def parent_nav():
-    items=[("🏠 Начало","Начало"),("📅 Тренировки","Тренировки"),("✅ Присъствие / отсъствие","Присъствия"),("⚽ Мачове","Мачове"),("💬 Съобщение от треньор","Съобщения"),("💰 Такси и Поръчки","Такси"),("ℹ️ Информация","Информация"),("📝 Обратна връзка","Обратна връзка"),("🗣️ ФЕН ЧАТ","ФЕН ЧАТ"),("👤 Настройки","Настройки")]
+    items=[("🏠 Начало","Начало"),("📅 Тренировки","Тренировки"),("⚽ Мачове","Мачове"),("💬 Съобщение от треньор","Съобщения"),("💰 Такси и Поръчки","Такси"),("ℹ️ Информация","Информация"),("📝 Обратна връзка","Обратна връзка"),("🗣️ ФЕН ЧАТ","ФЕН ЧАТ"),("👤 Настройки","Настройки")]
     st.session_state.setdefault("parent_page","Начало")
     with st.container(key="parent_nav"):
         for start in range(0,len(items),2):
@@ -2977,11 +2977,11 @@ def parent_panel(user):
                     for r in items:
                         a,b,c=st.columns([2,1,4]);a.markdown(training_date_html(r['starts_at']),unsafe_allow_html=True);b.write(f"**{r['starts_at']:%H:%M}**");c.write(f"📍 {r.get('location') or 'Без място'}")
         else:st.info("Няма добавени тренировки за избраното дете.")
+        st.divider()
+        render_parent_attendance_history(child)
         st.divider();show_development=st.checkbox("📊 Развитие на футболиста",False,key=f"show_development_{child['id']}")
         st.info("ℹ️ Тази статистика не е актуална. Ще бъдете уведомени от треньора, когато оценяването влезе в сила.")
         if show_development:render_parent_player_development(user,child)
-    elif page == "Присъствия":
-        render_parent_attendance_history(child)
     elif page == "Мачове":
         match_view=st.radio(
             "Мачове",
@@ -4348,9 +4348,6 @@ def coach_panel(user):
                 if row.get("sender_user_id") == user["id"] and st.button("🗑️ Изтрий", key=f"coach_delete_message_{row['id']}"):
                     execute("DELETE FROM team_messages WHERE academy_id=%s AND id=%s", (ACADEMY_ID,row['id']))
                     st.rerun()
-        st.divider()
-        if st.button("💬 Отвори Екипен чат",key=f"open_team_chat_{team['id']}",use_container_width=True,type="primary"):
-            st.session_state["coach_menu"]="💬 Екипен чат";st.rerun()
         st.divider()
         with st.expander("✉️ Лични съобщения между треньори", expanded=False):
             staff_direct_messages_panel(user)
