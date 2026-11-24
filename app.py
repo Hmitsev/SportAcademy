@@ -865,6 +865,20 @@ except (psycopg2.OperationalError, psycopg2.InterfaceError):
         st.rerun()
 
     st.stop()
+# ONE-TIME CLEAN ROLLOUT RESET
+CLEAN_ROLLOUT_RESET_KEY="academy_clean_rollout_2026_11_24_v2"
+def run_clean_rollout_reset():
+    with db() as conn,conn.cursor() as cur:
+        cur.execute("CREATE TABLE IF NOT EXISTS app_migrations(migration_key TEXT PRIMARY KEY,applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
+        cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))",(CLEAN_ROLLOUT_RESET_KEY,));cur.execute("SELECT 1 FROM app_migrations WHERE migration_key=%s",(CLEAN_ROLLOUT_RESET_KEY,))
+        if cur.fetchone():return False
+        for table in ("public_posts","player_fees","expenses","shop_orders","feedback","coach_inbox_messages","specialist_messages","staff_direct_messages","staff_chat_messages","fan_chat_messages","notifications"):
+            cur.execute(f"DELETE FROM {table} WHERE academy_id=%s",(ACADEMY_ID,))
+        cur.execute("DELETE FROM polls WHERE academy_id=%s AND poll_type='global'",(ACADEMY_ID,))
+        cur.execute("INSERT INTO app_migrations(migration_key) VALUES(%s)",(CLEAN_ROLLOUT_RESET_KEY,));return True
+try:_retry_db_call(run_clean_rollout_reset,attempts=3)
+except (psycopg2.OperationalError,psycopg2.InterfaceError):pass
+
 def apply_style():
     bg = image_data(ASSETS["background"])
 
@@ -2516,7 +2530,7 @@ def render_registration_children(parent_user_id):
         st.write(f"• {child['first_name']} {child['last_name']} · 🎂 {birth_text} · {child.get('team_name') or 'Без набор'}")
 
 def parent_nav():
-    items=[("🏠 Начало","Начало"),("📅 Тренировки","Тренировки"),("⚽ Мачове","Мачове"),("💬 Съобщение от треньор","Съобщения"),("💰 Такси и Поръчки","Такси"),("ℹ️ Информация","Информация"),("📝 Обратна връзка","Обратна връзка"),("🗣️ ФЕН ЧАТ","ФЕН ЧАТ"),("👤 Настройки","Настройки")]
+    items=[("🏠 Начало","Начало"),("📅 Тренировки","Тренировки"),("✅ Присъствие / отсъствие","Присъствия"),("⚽ Мачове","Мачове"),("💬 Съобщение от треньор","Съобщения"),("💰 Такси и Поръчки","Такси"),("ℹ️ Информация","Информация"),("📝 Обратна връзка","Обратна връзка"),("🗣️ ФЕН ЧАТ","ФЕН ЧАТ"),("👤 Настройки","Настройки")]
     st.session_state.setdefault("parent_page","Начало")
     with st.container(key="parent_nav"):
         for start in range(0,len(items),2):
@@ -2876,6 +2890,30 @@ def render_results_dashboard(team, editable=False, key_prefix="results"):
 def results_statistics_panel(team):
     render_results_dashboard(team,editable=True,key_prefix="coach_results")
 
+def attendance_history_rows(team_id,player_id=None):
+    extra=" AND a.player_id=%s" if player_id is not None else "";params=(ACADEMY_ID,team_id,player_id) if player_id is not None else (ACADEMY_ID,team_id)
+    return fetchall(f"""SELECT a.status,a.marked_at,e.starts_at,e.title,p.first_name,p.last_name FROM attendance a JOIN events e ON e.id=a.event_id JOIN players p ON p.id=a.player_id WHERE a.academy_id=%s AND e.team_id=%s {extra} ORDER BY e.starts_at DESC,p.first_name,p.last_name""",params)
+def render_parent_attendance_history(child):
+    st.subheader("✅ Присъствия и отсъствия");rows=attendance_history_rows(child.get("team_id"),child["id"]) if child.get("team_id") else []
+    flt=st.selectbox("Покажи",["Всички","Присъствия","Отсъствия"],key=f"parent_att_{child['id']}")
+    if flt!="Всички":rows=[r for r in rows if r["status"]==("present" if flt=="Присъствия" else "absent")]
+    if not rows:st.info("Все още няма отразени присъствия или отсъствия.");return
+    months={}
+    for r in rows:months.setdefault(r["starts_at"].strftime("%m.%Y"),[]).append(r)
+    for period,items in months.items():
+        with st.expander(f"📅 {period} · {sum(r['status']=='present' for r in items)} присъствия · {sum(r['status']=='absent' for r in items)} отсъствия"):
+            for r in items:st.write(f"{'🟢' if r['status']=='present' else '🔴'} **{r['starts_at']:%d.%m.%Y %H:%M}** · {'Присъства' if r['status']=='present' else 'Отсъства'}")
+def render_coach_attendance_history(team):
+    st.markdown("### 📚 Подадени присъствени форми");rows=attendance_history_rows(team["id"])
+    if not rows:st.info("Все още няма подадени присъствени форми.");return
+    c1,c2,c3=st.columns(3);nf=c1.selectbox("Име",["Всички"]+sorted({f"{r['first_name']} {r['last_name']}" for r in rows}),key=f"ahn{team['id']}");df=c2.selectbox("Дата",["Всички"]+sorted({r['starts_at'].strftime('%d.%m.%Y') for r in rows},reverse=True),key=f"ahd{team['id']}");sf=c3.selectbox("Статус",["Всички","Присъства","Отсъства"],key=f"ahs{team['id']}")
+    rows=[r for r in rows if (nf=="Всички" or f"{r['first_name']} {r['last_name']}"==nf) and (df=="Всички" or r['starts_at'].strftime('%d.%m.%Y')==df) and (sf=="Всички" or r['status']==('present' if sf=="Присъства" else 'absent'))]
+    groups={}
+    for r in rows:groups.setdefault((r['starts_at'],r['title']),[]).append(r)
+    for (dt,title),items in groups.items():
+        with st.expander(f"📅 {dt:%d.%m.%Y %H:%M} · {title} · {len(items)} записа"):
+            for r in items:st.write(f"{'🟢' if r['status']=='present' else '🔴'} **{r['first_name']} {r['last_name']}** · {'Присъства' if r['status']=='present' else 'Отсъства'}")
+
 def parent_panel(user):
     parent_lions_banner(); parent_nav(); show_flash()
     page=st.session_state.parent_page
@@ -2942,6 +2980,8 @@ def parent_panel(user):
         st.divider();show_development=st.checkbox("📊 Развитие на футболиста",False,key=f"show_development_{child['id']}")
         st.info("ℹ️ Тази статистика не е актуална. Ще бъдете уведомени от треньора, когато оценяването влезе в сила.")
         if show_development:render_parent_player_development(user,child)
+    elif page == "Присъствия":
+        render_parent_attendance_history(child)
     elif page == "Мачове":
         match_view=st.radio(
             "Мачове",
@@ -3653,7 +3693,7 @@ def admin_dyulgerov_panel(user):
     teams=fetchall("SELECT * FROM teams WHERE academy_id=%s AND active ORDER BY birth_year,name",(ACADEMY_ID,))
     if not teams: st.info("Няма активни набори."); return
     tmap={t["name"]:t for t in teams}; team=tmap[st.selectbox("Набор",list(tmap),key="dyulgerov_team")]
-    view=st.radio("Меню",["Табло","🏃 Тренировъчен график","📅 Създаден график","⚽ Създаване МАЧ","Мачове","🏆 Резултати","🛍️ Екипировка / Аксесоари","Съобщение"],horizontal=True,key="dyulgerov_view",label_visibility="collapsed")
+    view=st.radio("Меню",["Табло","🏃 Тренировъчен график","📅 Създаден график","⚽ Създаване МАЧ","⚽ Група за мача","Мачове","🏆 Резултати","🛍️ Екипировка / Аксесоари","Съобщение"],horizontal=True,key="dyulgerov_view",label_visibility="collapsed")
     if view=="Табло":
         render_all_academy_birthday_banners()
         players=fetchone("SELECT COUNT(*) c FROM players WHERE academy_id=%s AND team_id=%s AND active AND approval_status='approved'",(ACADEMY_ID,team["id"]))["c"]
@@ -3667,6 +3707,23 @@ def admin_dyulgerov_panel(user):
         compact_team_training_view(team,key_prefix=f"dyulgerov_created_schedule_{team['id']}")
     elif view=="⚽ Създаване МАЧ":
         multi_date_event_form("dyulgerov_match_form",teams,user["id"],fixed_team_id=team["id"],event_mode="match")
+    elif view=="⚽ Група за мача":
+        matches=fetchall("SELECT * FROM events WHERE academy_id=%s AND team_id=%s AND event_type='match' AND status<>'cancelled' ORDER BY starts_at",(ACADEMY_ID,team["id"]))
+        if not matches:st.info("Първо създай мач.")
+        else:
+            mm={f"{m['starts_at']:%d.%m.%Y %H:%M} · {m['title']}":m for m in matches};match=mm[st.selectbox("Избери мач",list(mm),key=f"dy_match_{team['id']}")]
+            players=fetchall("SELECT * FROM players WHERE academy_id=%s AND team_id=%s AND approval_status='approved' AND active ORDER BY first_name,last_name",(ACADEMY_ID,team["id"]));existing={r['player_id']:r['squad_status'] for r in fetchall("SELECT player_id,squad_status FROM match_squads WHERE academy_id=%s AND event_id=%s",(ACADEMY_ID,match['id']))}
+            with st.form(f"dy_squad_{match['id']}"):
+                choices={p['id']:st.checkbox(f"{p['first_name']} {p['last_name']}",existing.get(p['id'])=='in_group',key=f"dysq_{match['id']}_{p['id']}") for p in players};save=st.form_submit_button("Изпрати групата към родителите",use_container_width=True,type="primary")
+            if save:
+                with db() as conn,conn.cursor() as cur:
+                    cur.execute("DELETE FROM match_squads WHERE academy_id=%s AND event_id=%s",(ACADEMY_ID,match['id']))
+                    for pid,val in choices.items():cur.execute("INSERT INTO match_squads(academy_id,event_id,player_id,squad_status,selected_by) VALUES(%s,%s,%s,%s,%s)",(ACADEMY_ID,match['id'],pid,'in_group' if val else 'not_in_group',user['id']))
+                notify_team_parents(team['id'],'match_squad','Публикувана е група за мача',match['title']);set_flash("✅ Групата е изпратена.");st.rerun()
+            selected=fetchall("SELECT p.first_name,p.last_name FROM match_squads ms JOIN players p ON p.id=ms.player_id WHERE ms.academy_id=%s AND ms.event_id=%s AND ms.squad_status='in_group' ORDER BY p.first_name,p.last_name",(ACADEMY_ID,match['id']))
+            with st.expander(f"👥 Визуализация на групата · {len(selected)} футболисти",expanded=True):
+                for x in selected:st.write(f"✅ {x['first_name']} {x['last_name']}")
+                if not selected:st.caption("Все още няма избрани футболисти.")
     elif view=="Мачове":
         rows=fetchall("SELECT * FROM events WHERE academy_id=%s AND team_id=%s AND event_type='match' AND status<>'cancelled' ORDER BY starts_at DESC LIMIT 100",(ACADEMY_ID,team["id"]))
         for row in rows:
@@ -4131,7 +4188,7 @@ def coach_panel(user):
     st.sidebar.markdown(avatar_html(coach.get("profile_image"),coach.get("profile_image_mime"),72),unsafe_allow_html=True)
     st.sidebar.caption(coach["display_name"])
     sections = ["Табло", "Тренировки и мачове", "Такси", "Съобщения", "Обратна връзка", "Присъствие", "Упражнения", "🏆 Резултати", "🛍️ Екипировка / Аксесоари", "📦 Инвентар", "💬 Екипен чат"]
-    sec = st.sidebar.radio("Треньорско меню", sections)
+    sec = st.sidebar.radio("Треньорско меню", sections, key="coach_menu")
     tmap = {t["name"]: t for t in teams}
     team_name = st.selectbox("Набор", list(tmap), key="coach_selected_team")
     team = tmap[team_name]
@@ -4259,6 +4316,7 @@ def coach_panel(user):
                                ON CONFLICT(event_id,player_id) DO UPDATE SET status=EXCLUDED.status,marked_by=EXCLUDED.marked_by,marked_at=NOW()""",
                             (ACADEMY_ID,event["id"],player_id,status,user["id"]))
                 set_flash("✅ Присъствието е запазено успешно."); st.rerun()
+            st.divider();render_coach_attendance_history(team)
     elif sec == "Такси":
         payment_panel(user,[t["id"] for t in teams],fixed_team_id=team["id"])
     elif sec == "🏆 Резултати":
@@ -4291,9 +4349,8 @@ def coach_panel(user):
                     execute("DELETE FROM team_messages WHERE academy_id=%s AND id=%s", (ACADEMY_ID,row['id']))
                     st.rerun()
         st.divider()
-        st.subheader("💬 Екипен чат")
-        st.caption("Съобщения между Admin, треньори и кондиционен/поддържащ екип.")
-        staff_team_chat(user)
+        if st.button("💬 Отвори Екипен чат",key=f"open_team_chat_{team['id']}",use_container_width=True,type="primary"):
+            st.session_state["coach_menu"]="💬 Екипен чат";st.rerun()
         st.divider()
         with st.expander("✉️ Лични съобщения между треньори", expanded=False):
             staff_direct_messages_panel(user)
