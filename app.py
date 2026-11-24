@@ -3181,7 +3181,7 @@ def parent_panel(user):
             st.warning("За този набор още няма активен треньорски профил.")
         else:
             with st.form(f"feedback_{child['id']}"):
-                feedback_type = st.selectbox("Тип", ["signal", "rating", "suggestion"], format_func=lambda x:{"signal":"Сигнал","rating":"Оценка","suggestion":"Предложение"}[x])
+                feedback_type = st.selectbox("Тип", ["signal", "rating", "suggestion", "absence"], format_func=lambda x:{"signal":"Сигнал","rating":"Оценка","suggestion":"Предложение","absence":"Отсъствие"}[x])
                 rating = st.slider("Оценка", 1, 5, 5) if feedback_type == "rating" else None
                 subject = st.text_input("Тема")
                 body = st.text_area("Съобщение")
@@ -4360,19 +4360,37 @@ def coach_panel(user):
         if not events: st.info("Първо създай тренировка или мач.")
         else:
             emap = {f"{e['starts_at']:%d.%m.%Y %H:%M} · {e['title']}": e for e in events}
-            event_label = st.selectbox("Събитие", list(emap)); event = emap[event_label]
+            event_labels = st.multiselect(
+                "Събитие / събития",
+                list(emap),
+                placeholder="Избери едно или повече събития",
+                help="Може да отразиш едно и също присъствие/отсъствие за няколко тренировки или мача наведнъж.",
+                key=f"attendance_events_{team['id']}",
+            )
+            selected_events = [emap[label] for label in event_labels]
             players = fetchall("SELECT * FROM players WHERE academy_id=%s AND team_id=%s AND approval_status='approved' AND active ORDER BY first_name", (ACADEMY_ID, team["id"]))
-            with st.form("attendance_form"):
-                marks = {}
-                for player in players:
-                    marks[player["id"]] = st.selectbox(f"{player['first_name']} {player['last_name']}", ["present","absent"], format_func=lambda x:{"present":"Присъства","absent":"Отсъства"}[x], key=f"att_{event['id']}_{player['id']}")
-                saved = st.form_submit_button("Запази присъствието", use_container_width=True)
-            if saved:
-                for player_id,status in marks.items():
-                    execute("""INSERT INTO attendance(academy_id,event_id,player_id,status,marked_by) VALUES(%s,%s,%s,%s,%s)
-                               ON CONFLICT(event_id,player_id) DO UPDATE SET status=EXCLUDED.status,marked_by=EXCLUDED.marked_by,marked_at=NOW()""",
-                            (ACADEMY_ID,event["id"],player_id,status,user["id"]))
-                set_flash("✅ Присъствието е запазено успешно."); st.rerun()
+            if not selected_events:
+                st.info("Избери поне едно събитие, за да отразиш присъствие или отсъствие.")
+            else:
+                with st.form(f"attendance_form_{team['id']}"):
+                    st.caption(f"Избрани събития: {len(selected_events)}")
+                    marks = {}
+                    for player in players:
+                        marks[player["id"]] = st.selectbox(
+                            f"{player['first_name']} {player['last_name']}",
+                            ["present","absent"],
+                            format_func=lambda x:{"present":"Присъства","absent":"Отсъства"}[x],
+                            key=f"att_multi_{team['id']}_{player['id']}",
+                        )
+                    saved = st.form_submit_button("Запази за избраните събития", use_container_width=True)
+                if saved:
+                    with db() as conn, conn.cursor() as cur:
+                        for event in selected_events:
+                            for player_id,status in marks.items():
+                                cur.execute("""INSERT INTO attendance(academy_id,event_id,player_id,status,marked_by) VALUES(%s,%s,%s,%s,%s)
+                                               ON CONFLICT(event_id,player_id) DO UPDATE SET status=EXCLUDED.status,marked_by=EXCLUDED.marked_by,marked_at=NOW()""",
+                                            (ACADEMY_ID,event["id"],player_id,status,user["id"]))
+                    set_flash(f"✅ Присъствието е запазено за {len(selected_events)} събития."); st.rerun()
             st.divider();render_coach_attendance_history(team)
     elif sec == "Такси":
         payment_panel(user,[t["id"] for t in teams],fixed_team_id=team["id"])
