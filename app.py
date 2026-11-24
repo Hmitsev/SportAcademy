@@ -1569,8 +1569,21 @@ def fan_chat(user, team_id):
                 st.rerun()
 
     rows = fetchall(
-        """SELECT f.*,u.first_name,u.last_name FROM fan_chat_messages f
+        """SELECT f.*,u.first_name,u.last_name,
+                  COALESCE(pc.child_labels,'') AS child_labels
+           FROM fan_chat_messages f
            JOIN users u ON u.id=f.sender_user_id
+           LEFT JOIN LATERAL (
+               SELECT STRING_AGG(DISTINCT (p.first_name || ' (' || t.birth_year::text || ')'), ' / ')
+                      AS child_labels
+               FROM parent_players pp
+               JOIN players p ON p.id=pp.player_id AND p.academy_id=pp.academy_id
+               JOIN teams t ON t.id=p.team_id AND t.academy_id=p.academy_id
+               WHERE pp.academy_id=f.academy_id
+                 AND pp.parent_user_id=f.sender_user_id
+                 AND p.team_id=f.team_id
+                 AND p.active
+           ) pc ON TRUE
            WHERE f.academy_id=%s AND f.team_id=%s
              AND f.created_at >= NOW() - INTERVAL '10 days'
            ORDER BY f.created_at DESC LIMIT 100""",
@@ -1580,7 +1593,10 @@ def fan_chat(user, team_id):
         st.info("Няма съобщения във ФЕН ЧАТ от последните 10 дни.")
     for row in rows:
         with st.container(border=True):
-            st.write(f"**{row['first_name']} {row['last_name']}**")
+            sender_label = row['first_name']
+            if row.get('child_labels'):
+                sender_label += f" / {row['child_labels']}"
+            st.write(f"**{sender_label}**")
             if row.get("body"):
                 st.write(row["body"])
             if row.get("image_data"):
@@ -3286,9 +3302,9 @@ def multi_date_event_form(form_key, teams, user_id, fixed_team_id=None, event_mo
         player_name_by_id={p["id"]:f"{p['first_name']} {p['last_name']}" for p in team_players}
         all_children=st.checkbox("✅ Графикът е за всички деца от набора",True,key=f"{form_key}_training_all_children")
         if all_children:
-            st.success(f"Стандартен график: един час за избран ден и всички {len(team_players)} деца от набора.")
+            st.caption(f"Маркирани са всички {len(team_players)} деца от набора за всеки създаден ден и час.")
         else:
-            st.info("Разделен график: за всеки ден и всеки отделен час избери децата. Всички са маркирани по подразбиране и отмаркираш само тези, които няма да идват.")
+            st.info("За всеки ден и всеки отделен час избери кои деца да присъстват. Всички деца са маркирани по подразбиране и можеш да отмаркираш ненужните.")
         title = st.text_input(
             "Заглавие",
             value="Тренировка",
@@ -3332,27 +3348,22 @@ def multi_date_event_form(form_key, teams, user_id, fixed_team_id=None, event_mo
             key=f"{form_key}_weekdays",
         )
 
-        st.markdown("### 2. Задай стандартен час за всеки избран ден" if all_children else "### 2. Задай часове и деца за всеки избран ден")
+        st.markdown("### 2. Задай час и деца за всеки избран ден")
         day_slots = {}
         if selected_days:
             for day_name in selected_days:
                 day_number=weekday_options[day_name]
                 st.markdown(f"#### {day_name}")
-                if all_children:
-                    add_second_time=False
-                    st.caption("Стандартен график: един час за всички деца от набора.")
-                else:
-                    add_second_time=st.checkbox(
-                        f"➕ Добави втори час за {day_name}",
-                        key=f"{form_key}_second_time_{day_number}",
-                        help="Включи само ако в същия ден има втора група в различен час.",
-                    )
+                add_second_time=st.checkbox(
+                    f"➕ Добави втори час за {day_name}",
+                    key=f"{form_key}_second_time_{day_number}",
+                )
                 slot_count=2 if add_second_time else 1
                 day_slots[day_name]=[]
                 slot_columns=st.columns(slot_count)
                 for slot_index in range(slot_count):
                     with slot_columns[slot_index]:
-                        slot_label=("Час" if all_children else ("Първи час" if slot_index==0 else "Втори час"))
+                        slot_label="Първи час" if slot_index==0 else "Втори час"
                         default_time="18:30" if slot_index==0 else "19:30"
                         event_time=st.time_input(
                             slot_label,
@@ -3409,7 +3420,7 @@ def multi_date_event_form(form_key, teams, user_id, fixed_team_id=None, event_mo
         elif schedule:
             st.info(f"Ще бъдат създадени {len(schedule)} тренировки.")
             with st.expander("Покажи всички дати", expanded=len(schedule) <= 10):
-                for event_date, event_time, day_name, slot_player_ids in schedule:
+                for event_date, event_time, day_name in schedule:
                     preview_dt=datetime.combine(event_date,event_time)
                     st.markdown("✅ "+training_datetime_html(preview_dt),unsafe_allow_html=True)
 
