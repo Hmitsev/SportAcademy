@@ -2461,64 +2461,26 @@ def register_parent():
                     cur.execute("INSERT INTO parent_players(academy_id,parent_user_id,player_id) VALUES(%s,%s,%s)",(ACADEMY_ID,parent['id'],player['id']))
             st.success("Регистрацията е изпратена. Администраторът трябва да одобри профила и да свърже децата с група.")
         except Exception:st.error("Имейлът вече е използван или данните са невалидни.")
-LOGIN_AUTOFILL_COMPONENT = st.components.v2.component(
-    "dyulgerov_login_autofill_v1",
-    html="""
-    <form id="login-form" autocomplete="on">
-      <label for="login-email">Имейл</label>
-      <input id="login-email" name="username" type="email" inputmode="email" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" required>
-      <label for="login-password">Парола</label>
-      <input id="login-password" name="password" type="password" autocomplete="current-password" required>
-      <button type="submit">Вход</button>
-      <div id="login-status" aria-live="polite"></div>
-    </form>
-    """,
-    css="""
-    #login-form{display:grid;gap:10px;width:100%;padding:2px 0 4px;color:#fff}
-    #login-form label{font-weight:700;color:#fff}
-    #login-form input{width:100%;box-sizing:border-box;min-height:48px;padding:10px 12px;border-radius:10px;border:1px solid rgba(214,183,101,.34);background:rgba(13,14,18,.82);color:#fff;font-size:16px;outline:none}
-    #login-form input:focus{border-color:#d6b765;box-shadow:0 0 0 1px #d6b765}
-    #login-form button{width:100%;min-height:46px;margin-top:4px;border-radius:11px;border:1px solid #e2c777;font-weight:800;cursor:pointer;background:linear-gradient(135deg,#956b20,#d1ad57);color:#fff;font-size:16px}
-    #login-status{min-height:1.1em;color:#f0d88a;font-size:.88rem}
-    """,
-    js="""
-    export default function(component){
-      const {parentElement,setStateValue,setTriggerValue}=component;
-      const form=parentElement.querySelector('#login-form');
-      const email=parentElement.querySelector('#login-email');
-      const password=parentElement.querySelector('#login-password');
-      const status=parentElement.querySelector('#login-status');
-      form.addEventListener('submit',(event)=>{
-        event.preventDefault();
-        const username=(email.value||'').trim().toLowerCase();
-        const currentPassword=password.value||'';
-        if(!username||!currentPassword){status.textContent='Попълнете имейл и парола.';return;}
-        status.textContent='Влизане...';
-        setStateValue('username',username);
-        setStateValue('password',currentPassword);
-        setTriggerValue('submitAt',Date.now());
-      });
-    }
-    """,
-)
-
 def login():
-    component_key="academy_login_autofill"
-    result=LOGIN_AUTOFILL_COMPONENT(
-        default={"username":"","password":"","submitAt":None},
-        key=component_key,
-        on_username_change=lambda:None,
-        on_password_change=lambda:None,
-        on_submitAt_change=lambda:None,
-        height=190,
-    )
-    state=st.session_state.get(component_key,{}) or {}
-    email=(getattr(result,"username","") or state.get("username") or "").strip().lower()
-    pw=(getattr(result,"password","") or state.get("password") or "")
-    submit_at=getattr(result,"submitAt",None) or state.get("submitAt")
-    handled_key="academy_login_autofill_handled"
-    if submit_at and st.session_state.get(handled_key)!=submit_at:
-        st.session_state[handled_key]=submit_at
+    # Native Streamlit login is kept for reliable submission on iPhone, Android and desktop.
+    # The custom iframe form was removed because iOS could keep it at "Влизане..."
+    # while the component state was still being transferred to Python.
+    with st.form("login_form", clear_on_submit=False):
+        email=st.text_input(
+            "Имейл",
+            key="login_email",
+            placeholder="name@example.com",
+        ).strip().lower()
+        pw=st.text_input(
+            "Парола",
+            type="password",
+            key="login_password",
+        )
+        go=st.form_submit_button("Вход",use_container_width=True,type="primary")
+    if go:
+        if not email or not pw:
+            st.error("Попълнете имейл и парола.")
+            return
         user=fetchone("SELECT * FROM users WHERE academy_id=%s AND lower(email)=lower(%s)",(ACADEMY_ID,email))
         if not user or user["password_hash"]!=hash_password(pw): st.error("Невалиден имейл или парола.")
         elif not user["active"]: st.error("Профилът е деактивиран.")
