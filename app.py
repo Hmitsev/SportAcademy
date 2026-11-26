@@ -1517,7 +1517,7 @@ def public_home():
     with motto_col:
         st.caption("Където успехът е танц на таланта")
     with anthem_col:
-        with st.expander("🦁 Химнът на лъвовете", expanded=False):
+        with st.expander("🦁 Химнът на лъвовете 🎶", expanded=False):
             st.caption("Официалният химн на Dyulgerov Academy.")
             if anthem_video_url: st.video(normalize_video_url(anthem_video_url))
             else: st.info("Химнът все още не е добавен.")
