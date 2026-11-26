@@ -355,6 +355,9 @@ def init_db():
             subject TEXT NOT NULL, body TEXT NOT NULL,
             is_read BOOLEAN NOT NULL DEFAULT FALSE,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""",
+        """ALTER TABLE feedback ADD COLUMN IF NOT EXISTS read_at TIMESTAMPTZ""",
+        """CREATE INDEX IF NOT EXISTS idx_feedback_read_cleanup ON feedback(academy_id,is_read,read_at)""",
+        """UPDATE feedback SET read_at=NOW() WHERE is_read=TRUE AND read_at IS NULL""",
         """CREATE TABLE IF NOT EXISTS notifications(
             id BIGSERIAL PRIMARY KEY, academy_id BIGINT NOT NULL REFERENCES academies(id) ON DELETE CASCADE,
             user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -589,6 +592,9 @@ def init_db():
           coach_user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
           admin_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL, subject TEXT NOT NULL, body TEXT NOT NULL,
           is_read BOOLEAN NOT NULL DEFAULT FALSE, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""",
+      """ALTER TABLE coach_inbox_messages ADD COLUMN IF NOT EXISTS read_at TIMESTAMPTZ""",
+      """CREATE INDEX IF NOT EXISTS idx_coach_inbox_read_cleanup ON coach_inbox_messages(academy_id,is_read,read_at)""",
+      """UPDATE coach_inbox_messages SET read_at=NOW() WHERE is_read=TRUE AND read_at IS NULL""",
       """CREATE TABLE IF NOT EXISTS staff_direct_messages(
           id BIGSERIAL PRIMARY KEY, academy_id BIGINT NOT NULL REFERENCES academies(id) ON DELETE CASCADE,
           sender_user_id BIGINT REFERENCES users(id) ON DELETE SET NULL, subject TEXT NOT NULL, body TEXT NOT NULL,
@@ -4634,29 +4640,42 @@ def coach_panel(user):
 
     elif sec == "Обратна връзка":
         st.subheader("📨 Съобщения от Admin")
-        admin_messages=fetchall("SELECT * FROM coach_inbox_messages WHERE academy_id=%s AND coach_user_id=%s ORDER BY created_at DESC",(ACADEMY_ID,user['id']))
+        execute("DELETE FROM coach_inbox_messages WHERE academy_id=%s AND coach_user_id=%s AND is_read=TRUE AND read_at IS NOT NULL AND read_at < NOW()-INTERVAL '10 days'",(ACADEMY_ID,user['id']))
+        admin_messages=fetchall("SELECT * FROM coach_inbox_messages WHERE academy_id=%s AND coach_user_id=%s ORDER BY is_read ASC,created_at DESC",(ACADEMY_ID,user['id']))
+        if not admin_messages: st.info("Няма съобщения от Admin.")
+        unread_admin_ids=[]
         for msg in admin_messages:
-            with st.container(border=True): st.write(f"**{msg['subject']}**");st.write(msg['body']);st.caption(msg['created_at'].strftime('%d.%m.%Y %H:%M'))
-        execute("UPDATE coach_inbox_messages SET is_read=TRUE WHERE academy_id=%s AND coach_user_id=%s",(ACADEMY_ID,user['id']))
+            status="🔴 Непрочетено" if not msg.get("is_read") else "🟢 Прочетено"
+            if not msg.get("is_read"): unread_admin_ids.append(msg["id"])
+            with st.container(border=True):
+                st.caption(status);st.write(f"**{msg['subject']}**");st.write(msg['body']);st.caption(msg['created_at'].strftime('%d.%m.%Y %H:%M'))
+        if unread_admin_ids:
+            execute("UPDATE coach_inbox_messages SET is_read=TRUE,read_at=COALESCE(read_at,NOW()) WHERE academy_id=%s AND coach_user_id=%s AND id=ANY(%s)",(ACADEMY_ID,user['id'],unread_admin_ids))
         st.divider()
         st.subheader("📝 Обратна връзка от родители")
+        execute("DELETE FROM feedback WHERE academy_id=%s AND coach_user_id=%s AND is_read=TRUE AND read_at IS NOT NULL AND read_at < NOW()-INTERVAL '10 days'",(ACADEMY_ID,user["id"]))
         rows = fetchall(
             """SELECT f.*,u.first_name,u.last_name,p.first_name player_first,p.last_name player_last,t.name team_name
                FROM feedback f JOIN users u ON u.id=f.parent_user_id
                LEFT JOIN players p ON p.id=f.player_id
                LEFT JOIN teams t ON t.id=p.team_id
-               WHERE f.academy_id=%s AND f.coach_user_id=%s ORDER BY f.created_at DESC""",
+               WHERE f.academy_id=%s AND f.coach_user_id=%s ORDER BY f.is_read ASC,f.created_at DESC""",
             (ACADEMY_ID, user["id"]),
         )
         if not rows: st.info("Няма изпратена обратна връзка.")
+        unread_feedback_ids=[]
         for row in rows:
+            status="🔴 Непрочетено" if not row.get("is_read") else "🟢 Прочетено"
+            if not row.get("is_read"): unread_feedback_ids.append(row["id"])
             with st.container(border=True):
+                st.caption(status)
                 st.markdown(f"**{row.get('first_name') or 'Родител'} / {row.get('player_first') or ''} {row.get('player_last') or ''} / {row.get('team_name') or 'Без набор'}**")
                 st.write(f"**{row['subject']}** · {row['feedback_type']}")
                 if row.get("rating"): st.write(f"Оценка: {row['rating']}/5")
                 st.write(row["body"])
                 st.caption(f"За: {row.get('player_first') or ''} {row.get('player_last') or ''} · {row['created_at']:%d.%m.%Y %H:%M}")
-        execute("UPDATE feedback SET is_read=TRUE WHERE academy_id=%s AND coach_user_id=%s", (ACADEMY_ID,user["id"]))
+        if unread_feedback_ids:
+            execute("UPDATE feedback SET is_read=TRUE,read_at=COALESCE(read_at,NOW()) WHERE academy_id=%s AND coach_user_id=%s AND id=ANY(%s)",(ACADEMY_ID,user["id"],unread_feedback_ids))
     else:
         st.info("Избери секция от треньорското меню.")
 
