@@ -3974,7 +3974,7 @@ def admin_dyulgerov_panel(user):
 
 def admin_panel(user):
     count = unread_notification_count(user["id"])
-    st.title("Административен панел")
+    st.title("Администратор")
     show_flash()
     if count > 0:
         with st.expander(f"🔔 {count} нови известия", expanded=False):
@@ -4292,6 +4292,8 @@ def admin_panel(user):
         admin_dyulgerov_panel(user)
     elif sec == "СЪОБЩЕНИЯ":
         staff_direct_messages_panel(user)
+    elif sec == "💬 Екипен чат":
+        staff_team_chat(user)
     elif sec == "НАСТРОЙКИ ЗА ПРОФИЛИТЕ" and profile_settings_page == "Управление тренировки":
         admin_training_resources(user)
     elif sec == "НАСТРОЙКИ ЗА ПРОФИЛИТЕ" and profile_settings_page == "Кондиционен екип":
