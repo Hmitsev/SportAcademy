@@ -1496,23 +1496,38 @@ def hero():
     with st.container():
         st.markdown('<div class="hero">', unsafe_allow_html=True)
         st.markdown("# DYULGEROV ACADEMY")
-        st.caption("Където успехът е танц на таланта")
         st.markdown('</div>', unsafe_allow_html=True)
+
+def normalize_video_url(url):
+    url=(url or "").strip()
+    if "youtube.com/shorts/" in url:
+        video_id=url.split("youtube.com/shorts/",1)[1].split("?",1)[0].split("/",1)[0]
+        return f"https://www.youtube.com/watch?v={video_id}"
+    if "youtu.be/" in url:
+        video_id=url.split("youtu.be/",1)[1].split("?",1)[0].split("/",1)[0]
+        return f"https://www.youtube.com/watch?v={video_id}"
+    return url
 
 def public_home():
     hero()
     video_url = academy().get("parent_help_video_url")
     anthem_video_url = academy().get("lions_anthem_video_url")
+
+    motto_col, anthem_col = st.columns([2.3, 1.2], vertical_alignment="center")
+    with motto_col:
+        st.caption("Където успехът е танц на таланта")
+    with anthem_col:
+        with st.expander("🦁 Химнът на лъвовете", expanded=False):
+            st.caption("Официалният химн на Dyulgerov Academy.")
+            if anthem_video_url: st.video(normalize_video_url(anthem_video_url))
+            else: st.info("Химнът все още не е добавен.")
+
     help_col, _ = st.columns([1.2, 2.8])
     with help_col:
         with st.expander("▶️ Как се използва приложението", expanded=False):
             st.caption("Кратко видео за родителския профил.")
             if video_url: st.video(video_url)
             else: st.info("Видео инструкцията все още не е добавена.")
-        with st.expander("🦁 Химнът на лъвовете", expanded=False):
-            st.caption("Официалният химн на Dyulgerov Academy.")
-            if anthem_video_url: st.video(anthem_video_url)
-            else: st.info("Химнът все още не е добавен.")
 
 def parent_information(user=None):
     st.subheader("ℹ️ Информационен архив")
@@ -3248,12 +3263,15 @@ def parent_panel(user):
                WHERE ct.academy_id=%s AND ct.team_id=%s AND c.active ORDER BY c.display_name""",
             (ACADEMY_ID,child.get("team_id")),
         ) if child.get("team_id") else []
+        admin_users=fetchall("SELECT id user_id,first_name,last_name FROM users WHERE academy_id=%s AND role='admin' AND active AND account_status='approved' ORDER BY first_name,last_name",(ACADEMY_ID,))
+        recipients=list(coach_users)
+        recipients += [{"user_id":a["user_id"],"display_name":f"{a['first_name']} {a['last_name']} (Admin)"} for a in admin_users]
         coach_user = None
-        if coach_users:
-            coach_map={c["display_name"]:c for c in coach_users}
-            coach_user=coach_map[st.selectbox("Избери треньор",list(coach_map),key=f"feedback_coach_{child['id']}")]
+        if recipients:
+            coach_map={c["display_name"]:c for c in recipients}
+            coach_user=coach_map[st.selectbox("Избери получател",list(coach_map),key=f"feedback_coach_{child['id']}")]
         if not coach_user or not coach_user.get("user_id"):
-            st.warning("За този набор още няма активен треньорски профил.")
+            st.warning("Няма активен получател за обратната връзка.")
         else:
             with st.form(f"feedback_{child['id']}"):
                 feedback_type = st.selectbox("Тип", ["signal", "rating", "suggestion", "absence"], format_func=lambda x:{"signal":"Сигнал","rating":"Оценка","suggestion":"Предложение","absence":"Отсъствие"}[x])
@@ -3744,7 +3762,7 @@ def specialist_panel(user):
     teams=specialist_teams(user["id"])
     st.sidebar.markdown(avatar_html(profile.get("profile_image"),profile.get("profile_image_mime"),72),unsafe_allow_html=True)
     st.sidebar.caption(f"{profile['display_name']} · {specialist_role_label(profile['specialist_type'])}")
-    sections=["Табло","Тренировки","Мачове","Съобщения","Информация","Статистика","🏆 Резултати","🛍️ Екипировка / Аксесоари","💬 Екипен чат"]
+    sections=["Табло","Тренировки","Мачове","Съобщения","Информация","Статистика","🏆 Резултати","🛍️ Екипировка / Аксесоари","💬 Екипен чат","📇 Деца и контакти"]
     sec=st.sidebar.radio("Меню",sections,key="specialist_menu")
     if sec=="💬 Екипен чат":
         staff_team_chat(user)
@@ -3755,12 +3773,12 @@ def specialist_panel(user):
         render_all_academy_birthday_banners()
         players=fetchone("SELECT COUNT(*) c FROM players WHERE academy_id=%s AND team_id=%s AND active AND approval_status='approved'",(ACADEMY_ID,team["id"]))["c"]
         st.metric("Деца в набора",players)
-        if st.button("📇 Информация и контакти за децата",key=f"specialist_contacts_{team['id']}",use_container_width=True):
-            st.session_state[f"specialist_show_contacts_{team['id']}"]=not st.session_state.get(f"specialist_show_contacts_{team['id']}",False)
-        if st.session_state.get(f"specialist_show_contacts_{team['id']}",False): render_child_contact_cards(team["id"])
         st.caption("Профилът има достъп само до наборите, които са зададени от Admin.")
         unread=unread_notification_count(user["id"])
         if unread:notification_center(user)
+    elif sec=="📇 Деца и контакти":
+        st.subheader("📇 Информация и контакти за децата")
+        render_child_contact_cards(team["id"])
     elif sec=="Тренировки":
         compact_team_training_view(team,key_prefix=f"specialist_training_{team['id']}")
     elif sec=="Мачове":
@@ -4244,8 +4262,6 @@ def admin_panel(user):
         admin_dyulgerov_panel(user)
     elif sec == "СЪОБЩЕНИЯ":
         staff_direct_messages_panel(user)
-    elif sec == "💬 Екипен чат":
-        staff_team_chat(user)
     elif sec == "НАСТРОЙКИ ЗА ПРОФИЛИТЕ" and profile_settings_page == "Управление тренировки":
         admin_training_resources(user)
     elif sec == "НАСТРОЙКИ ЗА ПРОФИЛИТЕ" and profile_settings_page == "Кондиционен екип":
@@ -4298,10 +4314,12 @@ def admin_panel(user):
         if coach_users:
             cmap={c['display_name']:c['user_id'] for c in coach_users}
             with st.form("admin_to_coach_message",clear_on_submit=True):
-                cname=st.selectbox("Треньор",list(cmap));subject=st.text_input("Тема");body=st.text_area("Съобщение");send=st.form_submit_button("Изпрати в Обратна връзка",use_container_width=True)
-            if send and subject.strip() and body.strip():
-                execute("INSERT INTO coach_inbox_messages(academy_id,coach_user_id,admin_user_id,subject,body) VALUES(%s,%s,%s,%s,%s)",(ACADEMY_ID,cmap[cname],user['id'],subject.strip(),body.strip()))
-                create_notification(cmap[cname],"admin_feedback","Ново съобщение от Admin",subject.strip());set_flash("✅ Съобщението е изпратено до треньора.");st.rerun()
+                cnames=st.multiselect("Получатели",list(cmap),placeholder="Избери един или повече души");subject=st.text_input("Тема");body=st.text_area("Съобщение");send=st.form_submit_button("Изпрати в Обратна връзка",use_container_width=True)
+            if send and cnames and subject.strip() and body.strip():
+                for cname in cnames:
+                    execute("INSERT INTO coach_inbox_messages(academy_id,coach_user_id,admin_user_id,subject,body) VALUES(%s,%s,%s,%s,%s)",(ACADEMY_ID,cmap[cname],user['id'],subject.strip(),body.strip()))
+                    create_notification(cmap[cname],"admin_feedback","Ново съобщение от Admin",subject.strip())
+                set_flash(f"✅ Съобщението е изпратено до {len(cnames)} получател(и).");st.rerun()
         else: st.info("Няма активни треньорски профили.")
         st.divider()
         st.subheader("📢 Информация към родители")
@@ -4352,7 +4370,7 @@ def admin_panel(user):
                     execute("UPDATE academies SET lions_anthem_video_url=%s WHERE id=%s",(anthem_video_url.strip() or None,ACADEMY_ID)); academy.clear(); st.rerun()
                 if va2.button("Премахни",use_container_width=True,key="remove_lions_anthem_video"):
                     execute("UPDATE academies SET lions_anthem_video_url=NULL WHERE id=%s",(ACADEMY_ID,)); academy.clear(); st.rerun()
-                if current_anthem_video: st.video(current_anthem_video)
+                if current_anthem_video: st.video(normalize_video_url(current_anthem_video))
                 else: st.info("Химнът все още не е добавен.")
     else:
         notification_center(user)
@@ -4375,19 +4393,22 @@ def coach_panel(user):
         return
     st.sidebar.markdown(avatar_html(coach.get("profile_image"),coach.get("profile_image_mime"),72),unsafe_allow_html=True)
     st.sidebar.caption(coach["display_name"])
-    sections = ["Табло", "Тренировки и мачове", "Такси", "Съобщения", "Обратна връзка", "Присъствие", "Упражнения", "🏆 Резултати", "🛍️ Екипировка / Аксесоари", "📦 Инвентар", "💬 Екипен чат"]
+    sections = ["Табло", "Тренировки и мачове", "Такси", "Съобщения", "Обратна връзка", "Присъствие", "Упражнения", "🏆 Резултати", "🛍️ Екипировка / Аксесоари", "📦 Инвентар", "💬 Екипен чат", "📇 Деца и контакти"]
     sec = st.sidebar.radio("Треньорско меню", sections, key="coach_menu")
+    if sec == "💬 Екипен чат":
+        staff_team_chat(user)
+        return
     tmap = {t["name"]: t for t in teams}
     team_name = st.selectbox("Набор", list(tmap), key="coach_selected_team")
     team = tmap[team_name]
 
-    if sec == "Табло":
+    if sec == "📇 Деца и контакти":
+        st.subheader("📇 Информация и контакти за децата")
+        render_child_contact_cards(team["id"])
+    elif sec == "Табло":
         render_all_academy_birthday_banners()
         players=fetchall("SELECT * FROM players WHERE academy_id=%s AND team_id=%s AND approval_status='approved' AND active ORDER BY first_name,last_name",(ACADEMY_ID,team["id"]))
         st.metric("Деца в групата",len(players))
-        if st.button("📇 Информация и контакти за децата",key=f"coach_contacts_{team['id']}",use_container_width=True):
-            st.session_state[f"coach_show_contacts_{team['id']}"]=not st.session_state.get(f"coach_show_contacts_{team['id']}",False)
-        if st.session_state.get(f"coach_show_contacts_{team['id']}",False): render_child_contact_cards(team["id"])
         st.divider(); st.subheader("⚽ Играч")
         for player in players:
             with st.container(border=True): player_card(player,position_edit=True,key_prefix=f"coach_{team['id']}")
@@ -4596,15 +4617,17 @@ def coach_panel(user):
         st.divider()
         st.subheader("📝 Обратна връзка от родители")
         rows = fetchall(
-            """SELECT f.*,u.first_name,u.last_name,p.first_name player_first,p.last_name player_last
+            """SELECT f.*,u.first_name,u.last_name,p.first_name player_first,p.last_name player_last,t.name team_name
                FROM feedback f JOIN users u ON u.id=f.parent_user_id
                LEFT JOIN players p ON p.id=f.player_id
+               LEFT JOIN teams t ON t.id=p.team_id
                WHERE f.academy_id=%s AND f.coach_user_id=%s ORDER BY f.created_at DESC""",
             (ACADEMY_ID, user["id"]),
         )
         if not rows: st.info("Няма изпратена обратна връзка.")
         for row in rows:
             with st.container(border=True):
+                st.markdown(f"**{row.get('first_name') or 'Родител'} / {row.get('player_first') or ''} {row.get('player_last') or ''} / {row.get('team_name') or 'Без набор'}**")
                 st.write(f"**{row['subject']}** · {row['feedback_type']}")
                 if row.get("rating"): st.write(f"Оценка: {row['rating']}/5")
                 st.write(row["body"])
