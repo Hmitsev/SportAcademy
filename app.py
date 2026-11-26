@@ -4783,7 +4783,9 @@ def render_push_opt_in(user):
         existing=fetchone("SELECT id FROM push_subscriptions WHERE academy_id=%s AND user_id=%s AND endpoint=%s AND active",(ACADEMY_ID,user["id"],endpoint))
         if not existing or st.session_state.get(state_key)!=fingerprint:
             if save_push_subscription(user["id"],subscription,user_agent):
-                execute("UPDATE push_subscriptions SET active=FALSE,updated_at=NOW() WHERE academy_id=%s AND user_id=%s AND endpoint<>%s AND active",(ACADEMY_ID,user["id"],endpoint))
+                # Не деактивираме другите устройства на същия потребител.
+                # Push абонаментът е постоянен в Service Worker и продължава да работи,
+                # дори когато Academy.Manager е затворено или премахнато от последните приложения.
                 st.session_state[state_key]=fingerprint
     except Exception:
         pass
