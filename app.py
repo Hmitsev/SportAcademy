@@ -498,6 +498,7 @@ def init_db():
         """UPDATE academies SET default_fee=35.00 WHERE default_fee=50.00""",
         """UPDATE fee_templates SET amount=35.00 WHERE amount=50.00""",
         """ALTER TABLE academies ADD COLUMN IF NOT EXISTS parent_help_video_url TEXT""",
+        """ALTER TABLE academies ADD COLUMN IF NOT EXISTS lions_anthem_video_url TEXT""",
         """ALTER TABLE players ADD COLUMN IF NOT EXISTS position TEXT""",
         """ALTER TABLE teams ADD COLUMN IF NOT EXISTS standings_url TEXT""",
         """ALTER TABLE player_fees ADD COLUMN IF NOT EXISTS confirmation_status TEXT NOT NULL DEFAULT 'unreported'""",
@@ -1501,12 +1502,17 @@ def hero():
 def public_home():
     hero()
     video_url = academy().get("parent_help_video_url")
+    anthem_video_url = academy().get("lions_anthem_video_url")
     help_col, _ = st.columns([1.2, 2.8])
     with help_col:
         with st.expander("▶️ Как се използва приложението", expanded=False):
             st.caption("Кратко видео за родителския профил.")
             if video_url: st.video(video_url)
             else: st.info("Видео инструкцията все още не е добавена.")
+        with st.expander("🦁 Химнът на лъвовете", expanded=False):
+            st.caption("Официалният химн на Dyulgerov Academy.")
+            if anthem_video_url: st.video(anthem_video_url)
+            else: st.info("Химнът все още не е добавен.")
 
 def parent_information(user=None):
     st.subheader("ℹ️ Информационен архив")
@@ -2605,6 +2611,37 @@ def render_all_academy_birthday_banners():
         banner=birthday_banner_bytes(person)
         if banner:st.image(banner,use_container_width=True)
     return len(seen)
+
+def team_child_contact_rows(team_id):
+    return fetchall("""SELECT p.id,p.first_name,p.last_name,p.birth_date,p.position,p.profile_image,p.profile_image_mime,
+        u.first_name parent_first,u.last_name parent_last,u.email parent_email,u.phone parent_phone
+        FROM players p LEFT JOIN parent_players pp ON pp.player_id=p.id AND pp.academy_id=p.academy_id
+        LEFT JOIN users u ON u.id=pp.parent_user_id AND u.academy_id=pp.academy_id AND u.role='parent'
+        WHERE p.academy_id=%s AND p.team_id=%s AND p.active AND p.approval_status='approved'
+        ORDER BY p.first_name,p.last_name,u.first_name,u.last_name""",(ACADEMY_ID,team_id))
+
+def render_child_contact_cards(team_id):
+    rows=team_child_contact_rows(team_id)
+    if not rows: st.info("Няма потвърдени деца в този набор."); return
+    grouped={}
+    for row in rows:
+        grouped.setdefault(row["id"],{"player":row,"parents":[]})
+        if row.get("parent_email") or row.get("parent_phone"): grouped[row["id"]]["parents"].append(row)
+    for item in grouped.values():
+        player=item["player"]
+        with st.container(border=True):
+            photo_col,info_col=st.columns([1,5])
+            with photo_col: st.markdown(avatar_html(player.get("profile_image"),player.get("profile_image_mime"),72),unsafe_allow_html=True)
+            with info_col:
+                st.markdown(f"### ⚽ {player['first_name']} {player['last_name']}")
+                if player.get("birth_date"): st.caption(f"Роден/а: {player['birth_date']:%d.%m.%Y}")
+                if player.get("position"): st.caption(f"Позиция: {player['position']}")
+                if item["parents"]:
+                    for parent in item["parents"]:
+                        parent_name=f"{parent.get('parent_first') or ''} {parent.get('parent_last') or ''}".strip() or "Регистриран родител"
+                        st.write(f"**👤 Родител: {parent_name}**")
+                        st.write(f"✉️ {parent.get('parent_email') or 'Няма имейл'} · ☎️ {parent.get('parent_phone') or 'Няма телефон'}")
+                else: st.warning("Няма свързан родителски контакт.")
 
 def registration_children(parent_user_id):
     return fetchall("""SELECT p.first_name,p.last_name,p.birth_date,t.name team_name,p.approval_status
@@ -3717,8 +3754,10 @@ def specialist_panel(user):
     if sec=="Табло":
         render_all_academy_birthday_banners()
         players=fetchone("SELECT COUNT(*) c FROM players WHERE academy_id=%s AND team_id=%s AND active AND approval_status='approved'",(ACADEMY_ID,team["id"]))["c"]
-        upcoming=fetchone("SELECT COUNT(*) c FROM events WHERE academy_id=%s AND team_id=%s AND starts_at>=NOW() AND status<>'cancelled'",(ACADEMY_ID,team["id"]))["c"]
-        c1,c2=st.columns(2);c1.metric("Деца в набора",players);c2.metric("Предстоящи събития",upcoming)
+        st.metric("Деца в набора",players)
+        if st.button("📇 Информация и контакти за децата",key=f"specialist_contacts_{team['id']}",use_container_width=True):
+            st.session_state[f"specialist_show_contacts_{team['id']}"]=not st.session_state.get(f"specialist_show_contacts_{team['id']}",False)
+        if st.session_state.get(f"specialist_show_contacts_{team['id']}",False): render_child_contact_cards(team["id"])
         st.caption("Профилът има достъп само до наборите, които са зададени от Admin.")
         unread=unread_notification_count(user["id"])
         if unread:notification_center(user)
@@ -3938,7 +3977,8 @@ def admin_panel(user):
             if not rows: st.info("Няма чакащи регистрации.")
             for r in rows:
                 c1, c2, c3 = st.columns([5, 1, 1])
-                c1.write(f"🔴 **{r['first_name']} {r['last_name']}** · {r['email']} · {r.get('phone') or 'Без телефон'}")
+                c1.markdown(f"### 🔴 Регистриран родител: {r['first_name']} {r['last_name']}")
+                c1.write(f"✉️ {r['email']} · ☎️ {r.get('phone') or 'Без телефон'}")
                 with c1:
                     render_registration_children(r["id"])
                 if c2.button("Одобри", key=f"au{r['id']}"):
@@ -3949,7 +3989,7 @@ def admin_panel(user):
             rows = fetchall("""SELECT DISTINCT u.* FROM users u LEFT JOIN parent_players pp ON pp.parent_user_id=u.id LEFT JOIN players p ON p.id=pp.player_id WHERE u.academy_id=%s AND u.role='parent' AND u.account_status='approved' AND (%s IS NULL OR p.team_id=%s) ORDER BY u.created_at DESC""", (ACADEMY_ID,registration_team_id,registration_team_id))
             if not rows: st.info("Архивът е празен.")
             for r in rows:
-                with st.expander(f"🟢 {r['first_name']} {r['last_name']} · {r['email']} · {r.get('phone') or 'Без телефон'}"):
+                with st.expander(f"🟢 Родител: {r['first_name']} {r['last_name']} · {r['email']} · {r.get('phone') or 'Без телефон'}"):
                     render_registration_children(r["id"])
                     st.divider()
                     st.caption("Ако родителят е забравил паролата, Admin може да зададе временна парола. След това родителят я сменя от Настройки.")
@@ -4302,6 +4342,18 @@ def admin_panel(user):
                     execute("UPDATE academies SET parent_help_video_url=NULL WHERE id=%s",(ACADEMY_ID,)); academy.clear(); st.rerun()
                 if current_help_video: st.video(current_help_video)
                 else: st.info("Видео инструкцията все още не е добавена.")
+            current_anthem_video=academy().get("lions_anthem_video_url") or ""
+            with st.container(border=True):
+                st.subheader("🦁 Химнът на лъвовете")
+                st.caption("Показва се на началния екран под мотото „Където успехът е танц на таланта“.")
+                anthem_video_url=st.text_input("Линк към видеото с химна",value=current_anthem_video,key="lions_anthem_video_url")
+                va1,va2=st.columns(2)
+                if va1.button("Запази",use_container_width=True,key="save_lions_anthem_video"):
+                    execute("UPDATE academies SET lions_anthem_video_url=%s WHERE id=%s",(anthem_video_url.strip() or None,ACADEMY_ID)); academy.clear(); st.rerun()
+                if va2.button("Премахни",use_container_width=True,key="remove_lions_anthem_video"):
+                    execute("UPDATE academies SET lions_anthem_video_url=NULL WHERE id=%s",(ACADEMY_ID,)); academy.clear(); st.rerun()
+                if current_anthem_video: st.video(current_anthem_video)
+                else: st.info("Химнът все още не е добавен.")
     else:
         notification_center(user)
 
@@ -4333,6 +4385,9 @@ def coach_panel(user):
         render_all_academy_birthday_banners()
         players=fetchall("SELECT * FROM players WHERE academy_id=%s AND team_id=%s AND approval_status='approved' AND active ORDER BY first_name,last_name",(ACADEMY_ID,team["id"]))
         st.metric("Деца в групата",len(players))
+        if st.button("📇 Информация и контакти за децата",key=f"coach_contacts_{team['id']}",use_container_width=True):
+            st.session_state[f"coach_show_contacts_{team['id']}"]=not st.session_state.get(f"coach_show_contacts_{team['id']}",False)
+        if st.session_state.get(f"coach_show_contacts_{team['id']}",False): render_child_contact_cards(team["id"])
         st.divider(); st.subheader("⚽ Играч")
         for player in players:
             with st.container(border=True): player_card(player,position_edit=True,key_prefix=f"coach_{team['id']}")
