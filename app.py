@@ -3263,9 +3263,18 @@ def parent_panel(user):
                WHERE ct.academy_id=%s AND ct.team_id=%s AND c.active ORDER BY c.display_name""",
             (ACADEMY_ID,child.get("team_id")),
         ) if child.get("team_id") else []
-        admin_users=fetchall("SELECT id user_id,first_name,last_name FROM users WHERE academy_id=%s AND role='admin' AND active AND account_status='approved' ORDER BY first_name,last_name",(ACADEMY_ID,))
+        admin_users=fetchall(
+            "SELECT id user_id FROM users WHERE academy_id=%s AND role='admin' AND active AND account_status='approved' ORDER BY id LIMIT 1",
+            (ACADEMY_ID,)
+        )
+        
         recipients=list(coach_users)
-        recipients += [{"user_id":a["user_id"],"display_name":f"{a['first_name']} {a['last_name']} (Admin)"} for a in admin_users]
+        
+        if admin_users:
+            recipients.append({
+                "user_id": admin_users[0]["user_id"],
+                "display_name": "Към Администрация"
+            })
         coach_user = None
         if recipients:
             coach_map={c["display_name"]:c for c in recipients}
